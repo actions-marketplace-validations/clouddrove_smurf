@@ -17,7 +17,7 @@ jobs:
           - GOOS: windows
             ext: .exe
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5.0.0
 
     - name: Set up Go
       uses: actions/setup-go@v5
@@ -50,7 +50,7 @@ jobs:
     needs:
       - build
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5.0.0
       with:
         fetch-depth: 0
 
@@ -102,7 +102,7 @@ jobs:
           password: ${{ secrets.GITHUB }}
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.0.0
 
       - name: Build Image
         run: make image IMAGE=ghcr.io/${{env.REPO}}:${{ github.ref_name }}
