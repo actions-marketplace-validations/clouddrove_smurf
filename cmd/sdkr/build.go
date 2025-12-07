@@ -10,7 +10,6 @@ import (
 
 	"github.com/clouddrove/smurf/configs"
 	"github.com/clouddrove/smurf/internal/docker"
-	"github.com/fatih/color"
 	"github.com/pterm/pterm"
 	"github.com/spf13/cobra"
 )
@@ -21,9 +20,10 @@ import (
 // Usage examples are included within the command definition below, showcasing various ways
 // to override defaults (e.g., no-cache, target stage, platform, and timeout).
 var buildCmd = &cobra.Command{
-	Use:   "build [IMAGE[:TAG]]",
-	Short: "Build a Docker image with the given name and tag.",
-	Args:  cobra.MaximumNArgs(1),
+	Use:          "build [IMAGE[:TAG]]",
+	Short:        "Build a Docker image with the given name and tag.",
+	Args:         cobra.MaximumNArgs(1),
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var imageName, tag string
 
@@ -44,7 +44,7 @@ var buildCmd = &cobra.Command{
 			if len(args) < 1 && data.Sdkr.ImageName != "" {
 				imageName, tag, err = configs.ParseImage(data.Sdkr.ImageName)
 				if err != nil {
-					return fmt.Errorf("invalid image format in config: %w", err)
+					return fmt.Errorf("invalid image format in config: %v", err)
 				}
 				if tag == "" {
 					tag = "latest"
@@ -80,7 +80,7 @@ var buildCmd = &cobra.Command{
 		}
 
 		if _, err := os.Stat(configs.DockerfilePath); os.IsNotExist(err) {
-			return fmt.Errorf(color.RedString("Dockerfile not found at %s", configs.DockerfilePath))
+			return fmt.Errorf("dockerfile not found at %v", configs.DockerfilePath)
 		}
 
 		// In the RunE function, when creating the opts
@@ -97,7 +97,7 @@ var buildCmd = &cobra.Command{
 
 		err := docker.Build(imageName, tag, opts)
 		if err != nil {
-			return fmt.Errorf(color.RedString("Docker build failed: %v", err))
+			return err
 		}
 		return nil
 	},
@@ -110,14 +110,14 @@ smurf sdkr build
 }
 
 func init() {
-    buildCmd.Flags().StringVarP(&configs.DockerfilePath, "file", "f", "", "Path to Dockerfile relative to context directory")
-    buildCmd.Flags().StringVar(&configs.ContextDir, "context", "", "Build context directory (default: current directory)")
-    buildCmd.Flags().BoolVar(&configs.NoCache, "no-cache", false, "Do not use cache when building the image")
-    buildCmd.Flags().StringArrayVar(&configs.BuildArgs, "build-arg", []string{}, "Set build-time variables")
-    buildCmd.Flags().StringVar(&configs.Target, "target", "", "Set the target build stage to build")
-    buildCmd.Flags().StringVar(&configs.Platform, "platform", "", "Set the platform for the build (e.g., linux/amd64, linux/arm64)")
-    buildCmd.Flags().IntVar(&configs.BuildTimeout, "timeout", 1500, "Set the build timeout")
-    buildCmd.Flags().BoolVar(&configs.BuildKit, "buildkit", false, "Enable BuildKit for advanced Dockerfile features")
+	buildCmd.Flags().StringVarP(&configs.DockerfilePath, "file", "f", "", "Path to Dockerfile relative to context directory")
+	buildCmd.Flags().StringVar(&configs.ContextDir, "context", "", "Build context directory (default: current directory)")
+	buildCmd.Flags().BoolVar(&configs.NoCache, "no-cache", false, "Do not use cache when building the image")
+	buildCmd.Flags().StringArrayVar(&configs.BuildArgs, "build-arg", []string{}, "Set build-time variables")
+	buildCmd.Flags().StringVar(&configs.Target, "target", "", "Set the target build stage to build")
+	buildCmd.Flags().StringVar(&configs.Platform, "platform", "", "Set the platform for the build (e.g., linux/amd64, linux/arm64)")
+	buildCmd.Flags().IntVar(&configs.BuildTimeout, "timeout", 1500, "Set the build timeout")
+	buildCmd.Flags().BoolVar(&configs.BuildKit, "buildkit", false, "Enable BuildKit for advanced Dockerfile features")
 
-    sdkrCmd.AddCommand(buildCmd)
+	sdkrCmd.AddCommand(buildCmd)
 }

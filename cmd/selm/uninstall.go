@@ -2,23 +2,22 @@ package selm
 
 import (
 	"errors"
-	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/clouddrove/smurf/configs"
 	"github.com/clouddrove/smurf/internal/helm"
-	"github.com/fatih/color"
+	"github.com/pterm/pterm"
 	"github.com/spf13/cobra"
 )
 
-// uninstallCmd implements a Helm uninstall operation for a specified release.
-// If no release name is provided on the command line, it attempts to read from
-// the config file. Additionally, a custom namespace can be specified via flags.
-// If none is provided, it defaults to "default".
 var uninstallCmd = &cobra.Command{
 	Use:   "uninstall [NAME]",
-	Short: "Uninstall a Helm release.",
-	Args:  cobra.MaximumNArgs(1),
+	Short: "Uninstall a Helm release and all its resources",
+	Long: `This command uninstalls a Helm release and ensures all associated Kubernetes resources
+are properly deleted. It automatically handles cleanup of remaining resources.`,
+	Args:         cobra.MaximumNArgs(1),
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var releaseName string
 
@@ -29,7 +28,7 @@ var uninstallCmd = &cobra.Command{
 		if releaseName == "" {
 			data, err := configs.LoadConfig(configs.FileName)
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
 			releaseName = data.Selm.ReleaseName
@@ -38,7 +37,8 @@ var uninstallCmd = &cobra.Command{
 			}
 
 			if releaseName == "" {
-				return errors.New(color.RedString("NAME must be provided either as an argument or in the config"))
+				pterm.Error.Printfln("NAME must be provided either as an argument or in the config")
+				return errors.New("NAME must be provided either as an argument or in the config")
 			}
 
 			if configs.Namespace == "" && data.Selm.Namespace != "" {
@@ -50,25 +50,42 @@ var uninstallCmd = &cobra.Command{
 			configs.Namespace = "default"
 		}
 
-		err := helm.HelmUninstall(releaseName, configs.Namespace)
+		// Get flags
+		timeout, _ := cmd.Flags().GetDuration("timeout")
+		disableHooks, _ := cmd.Flags().GetBool("no-hooks")
+		cascade, _ := cmd.Flags().GetString("cascade")
+
+		// Configure uninstall options
+		opts := helm.UninstallOptions{
+			ReleaseName:  releaseName,
+			Namespace:    configs.Namespace,
+			Timeout:      timeout,
+			DisableHooks: disableHooks,
+			Cascade:      cascade,
+		}
+
+		err := helm.HelmUninstall(opts)
 		if err != nil {
-			return fmt.Errorf(color.RedString("Helm uninstall failed: %v", err))
+			return err
 		}
 		return nil
 	},
 	Example: `
 smurf selm uninstall my-release
-# In this example, it will uninstall 'my-release' from the 'default' namespace
+# Uninstalls 'my-release' from the 'default' namespace
 
 smurf selm uninstall my-release -n my-namespace
-# In this example, it will uninstall 'my-release' from the 'my-namespace' namespace
+# Uninstalls 'my-release' from the 'my-namespace' namespace
 
 smurf selm uninstall
-# In this example, it will read NAME from the config file and uninstall from the specified namespace or 'default' if not set
+# Reads NAME from the config file and uninstalls from the specified namespace or 'default' if not set
 `,
 }
 
 func init() {
-	uninstallCmd.Flags().StringVarP(&configs.Namespace, "namespace", "n", "", "Specify the namespace to uninstall the Helm chart")
+	uninstallCmd.Flags().StringVarP(&configs.Namespace, "namespace", "n", "", "Namespace of the release")
+	uninstallCmd.Flags().Duration("timeout", 10*time.Minute, "Time to wait for deletion")
+	uninstallCmd.Flags().Bool("no-hooks", false, "Prevent hooks from running during uninstall")
+	uninstallCmd.Flags().String("cascade", "background", "Delete cascading policy (background, foreground, orphan)")
 	selmCmd.AddCommand(uninstallCmd)
 }

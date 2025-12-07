@@ -3,12 +3,12 @@ package selm
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/clouddrove/smurf/configs"
 	"github.com/clouddrove/smurf/internal/helm"
-	"github.com/fatih/color"
 	"github.com/pterm/pterm"
 	"github.com/spf13/cobra"
 )
@@ -16,31 +16,44 @@ import (
 var (
 	createNamespace     bool
 	installIfNotPresent bool
+	wait                bool
+	historyMax          int
 )
 
 // upgradeCmd facilitates upgrading an existing Helm release or installing it if it's not present
-// (depending on the `--install` flag). It supports specifying a custom namespace, waiting for
-// resources to become ready (`--atomic`), setting arbitrary values (`--set` and `--values`),
-// and other typical Helm upgrade options. If no arguments are provided, it attempts to read
-// settings from the config file.
 var upgradeCmd = &cobra.Command{
-	Use:   "upgrade [NAME] [CHART]",
-	Short: "Upgrade a deployed Helm chart.",
-	Args:  cobra.MaximumNArgs(2),
+	Use:          "upgrade [NAME] [CHART]",
+	Short:        "Upgrade a deployed Helm chart.",
+	Args:         cobra.MaximumNArgs(2),
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if configs.Debug {
+			pterm.EnableDebugMessages()
+			pterm.Println("=== DEBUG MODE ENABLED ===")
+		}
+
 		var releaseName, chartPath string
 
 		if len(args) >= 1 {
 			releaseName = args[0]
+			if configs.Debug {
+				pterm.Printf("Release name from argument: %s\n", releaseName)
+			}
 		}
 		if len(args) >= 2 {
 			chartPath = args[1]
+			if configs.Debug {
+				pterm.Printf("Chart path from argument: %s\n", chartPath)
+			}
 		}
 
 		if releaseName == "" || chartPath == "" {
+			if configs.Debug {
+				pterm.Println("Loading configuration from file...")
+			}
 			data, err := configs.LoadConfig(configs.FileName)
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
 			if releaseName == "" {
@@ -48,73 +61,137 @@ var upgradeCmd = &cobra.Command{
 				if releaseName == "" {
 					releaseName = filepath.Base(data.Selm.ChartName)
 				}
+				if configs.Debug {
+					pterm.Printf("Using release name from config: %s\n", releaseName)
+				}
 			}
 			if chartPath == "" {
 				chartPath = data.Selm.ChartName
+				if configs.Debug {
+					pterm.Printf("Using chart path from config: %s\n", chartPath)
+				}
 			}
 
 			if releaseName == "" || chartPath == "" {
-				return errors.New(color.RedString("RELEASE and CHART must be provided either as arguments or in the config"))
+				return errors.New("RELEASE and CHART must be provided either as arguments or in the config")
 			}
 
 			if configs.Namespace == "default" && data.Selm.Namespace != "" {
 				configs.Namespace = data.Selm.Namespace
-			}
-		}
-
-		if releaseName == "" || chartPath == "" {
-			return errors.New(color.RedString("RELEASE and CHART must be provided"))
-		}
-
-		timeoutDuration := time.Duration(configs.Timeout) * time.Second
-
-		if installIfNotPresent {
-			exists, err := helm.HelmReleaseExists(releaseName, configs.Namespace)
-			if err != nil {
-				return fmt.Errorf("failed to check if Helm release exists: %w", err)
-			}
-			if !exists {
-				if err := helm.HelmInstall(releaseName, chartPath, configs.Namespace, configs.File, timeoutDuration, configs.Atomic, configs.Debug, configs.Set, []string{}, RepoURL, Version); err != nil {
-					return fmt.Errorf(color.RedString("Helm install failed: %v", err))
+				if configs.Debug {
+					pterm.Printf("Using namespace from config: %s\n", configs.Namespace)
 				}
 			}
 		}
 
-		if configs.Namespace == "" {
-			configs.Namespace = "default"
+		if releaseName == "" || chartPath == "" {
+			pterm.Error.Printfln("RELEASE and CHART must be provided")
+			return errors.New("RELEASE and CHART must be provided")
 		}
 
-		err := helm.HelmUpgrade(
+		timeoutDuration := time.Duration(configs.Timeout) * time.Second
+
+		if configs.Debug {
+			pterm.Printf("Configuration\n")
+			pterm.Printf("  - Release: %s\n", releaseName)
+			pterm.Printf("  - Chart: %s\n", chartPath)
+			pterm.Printf("  - Namespace: %s\n", configs.Namespace)
+			pterm.Printf("  - Timeout: %v\n", timeoutDuration)
+			pterm.Printf("  - Atomic: %t\n", configs.Atomic)
+			pterm.Printf("  - Create Namespace: %t\n", createNamespace)
+			pterm.Printf("  - Install if not present: %t\n", installIfNotPresent)
+			pterm.Printf("  - Wait: %t\n", wait)
+			pterm.Printf("  - Set values: %v\n", configs.Set)
+			pterm.Printf("  - Values files: %v\n", configs.File)
+			pterm.Printf("  - Set literal: %v\n", configs.SetLiteral)
+			pterm.Printf("  - Repo URL: %s\n", RepoURL)
+			pterm.Printf("  - Version: %s\n", Version)
+			pterm.Printf("  - History Max: %d\n", historyMax)
+		}
+
+		// Check if release exists
+		exists, err := helm.HelmReleaseExists(releaseName, configs.Namespace, configs.Debug)
+		if err != nil {
+			return err
+		}
+
+		if !exists {
+			if installIfNotPresent {
+				if configs.Debug {
+					pterm.Println("Release not found, installing...")
+				}
+				if err := helm.HelmInstall(releaseName, chartPath, configs.Namespace, configs.File, timeoutDuration, configs.Atomic, configs.Debug, configs.Set, configs.SetLiteral, RepoURL, Version, wait); err != nil {
+					return err
+				}
+				if configs.Debug {
+					pterm.Println("Installation completed successfully")
+				}
+				pterm.Success.Println(".")
+				return nil
+			} else {
+				return fmt.Errorf("release %s not found in namespace %s. Use --install flag to install it", releaseName, configs.Namespace)
+			}
+		}
+
+		if configs.Debug {
+			pterm.Println("Release exists, proceeding with upgrade")
+		}
+
+		if configs.Namespace == "" {
+			configs.Namespace = "default"
+			if configs.Debug {
+				pterm.Printf("Using default namespace: %s\n", configs.Namespace)
+			}
+		}
+
+		if configs.Debug {
+			pterm.Println("Starting Helm upgrade...")
+		}
+
+		err = helm.HelmUpgrade(
 			releaseName,
 			chartPath,
 			configs.Namespace,
 			configs.Set,
 			configs.File,
-			[]string{},
+			configs.SetLiteral,
 			createNamespace,
 			configs.Atomic,
 			timeoutDuration,
 			configs.Debug,
 			RepoURL,
 			Version,
+			wait,
+			historyMax,
 		)
 		if err != nil {
-			return fmt.Errorf(color.RedString("Helm upgrade failed: %v", err))
+			os.Exit(1)
 		}
-		pterm.Success.Println("Helm chart upgraded successfully.")
+
 		return nil
 	},
 	Example: `
-smurf selm upgrade my-release ./mychart
-smurf selm upgrade my-release ./mychart -n my-namespace
-smurf selm upgrade my-release ./mychart --set key1=val1,key2=val2
-smurf selm upgrade my-release ./mychart -f values.yaml --timeout 600 --atomic --debug --install
-smurf selm upgrade my-release ./mychart --repo-url https://charts.example.com --version 1.2.3
-smurf selm upgrade my-release ./mychart --set key1=val1 --set key2=val2
-smurf selm upgrade my-release ./mychart --set-literal myPassword='MySecurePass!'
-smurf selm upgrade
-# In the last example, it will read RELEASE and CHART from the config file
-`,
+			# Upgrade without waiting (default behavior)
+			smurf selm upgrade my-release ./mychart
+
+			# Upgrade and wait for resources to be ready
+			smurf selm upgrade my-release ./mychart --wait
+
+			# Upgrade with custom timeout and waiting
+			smurf selm upgrade my-release ./mychart --timeout 600 --wait
+
+			# Install if not present without waiting (default)
+			smurf selm upgrade my-release ./mychart --install
+
+			# Install if not present with waiting
+			smurf selm upgrade my-release ./mychart --install --wait
+
+			# Upgrade with limited history
+			smurf selm upgrade my-release ./mychart --history-max 5
+
+			# Upgrade with all options
+			smurf selm upgrade my-release ./mychart --wait --timeout 300 --history-max 3 --atomic
+	`,
 }
 
 func init() {
@@ -129,5 +206,7 @@ func init() {
 	upgradeCmd.Flags().BoolVar(&installIfNotPresent, "install", false, "Install the chart if it is not already installed")
 	upgradeCmd.Flags().StringVar(&RepoURL, "repo-url", "", "Helm repository URL")
 	upgradeCmd.Flags().StringVar(&Version, "version", "", "Helm chart version")
+	upgradeCmd.Flags().BoolVar(&configs.Wait, "wait", false, "Wait until all Pods, PVCs, Services, and minimum number of Pods of a Deployment are ready before marking success")
+	upgradeCmd.Flags().IntVar(&historyMax, "history-max", 10, "Limit the maximum number of revisions saved per release") // Add this line
 	selmCmd.AddCommand(upgradeCmd)
 }

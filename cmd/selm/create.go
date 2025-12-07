@@ -2,11 +2,10 @@ package selm
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/clouddrove/smurf/configs"
 	"github.com/clouddrove/smurf/internal/helm"
-	"github.com/fatih/color"
+	"github.com/pterm/pterm"
 	"github.com/spf13/cobra"
 )
 
@@ -15,9 +14,10 @@ import (
 // It also supports specifying additional values via YAML files. Usage examples are provided below,
 // demonstrating how to set or omit command-line arguments and rely on config-based defaults.
 var createChartCmd = &cobra.Command{
-	Use:   "create [NAME]",
-	Short: "Create a new Helm chart in the specified directory.",
-	Args:  cobra.MaximumNArgs(1),
+	Use:          "create [NAME]",
+	Short:        "Create a new Helm chart in the specified directory.",
+	Args:         cobra.MaximumNArgs(1),
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var name string
 
@@ -28,23 +28,24 @@ var createChartCmd = &cobra.Command{
 		if name == "" {
 			data, err := configs.LoadConfig(configs.FileName)
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
 			name = data.Selm.ChartName
 		}
 
 		if name == "" {
-			return errors.New(color.RedString("NAME must be provided either as an argument or in the config"))
+			pterm.Error.Printfln("NAME must be provided either as an argument or in the config")
+			return errors.New("NAME must be provided either as an argument or in the config")
 		}
 
 		if len(configs.File) > 0 {
-			fmt.Printf("Using values files: %v\n", configs.File)
+			pterm.Info.Printfln("Using values files: %v\n", configs.File)
 		}
 
 		err := helm.CreateChart(name, configs.Directory)
 		if err != nil {
-			return fmt.Errorf(color.RedString("failed to create Helm chart: %v", err))
+			return err
 		}
 		return nil
 	},

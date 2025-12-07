@@ -2,12 +2,12 @@ package selm
 
 import (
 	"errors"
-	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/clouddrove/smurf/configs"
 	"github.com/clouddrove/smurf/internal/helm"
-	"github.com/fatih/color"
+	"github.com/pterm/pterm"
 	"github.com/spf13/cobra"
 )
 
@@ -16,9 +16,10 @@ import (
 // values in the config file. If neither is provided, it returns an error.
 // Additionally, a custom namespace can be specified via a flag.
 var statusCmd = &cobra.Command{
-	Use:   "status [NAME]",
-	Short: "Status of a Helm release.",
-	Args:  cobra.MaximumNArgs(1),
+	Use:          "status [NAME]",
+	Short:        "Status of a Helm release.",
+	Args:         cobra.MaximumNArgs(1),
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var releaseName string
 
@@ -29,7 +30,7 @@ var statusCmd = &cobra.Command{
 		if releaseName == "" {
 			data, err := configs.LoadConfig(configs.FileName)
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
 			releaseName = data.Selm.ReleaseName
@@ -38,7 +39,8 @@ var statusCmd = &cobra.Command{
 			}
 
 			if releaseName == "" {
-				return errors.New(color.RedString("NAME must be provided either as an argument or in the config"))
+				pterm.Error.Printfln("NAME must be provided either as an argument or in the config")
+				return errors.New(pterm.Error.Sprintfln("NAME must be provided either as an argument or in the config"))
 			}
 
 			if configs.Namespace == "" && data.Selm.Namespace != "" {
@@ -52,7 +54,7 @@ var statusCmd = &cobra.Command{
 
 		err := helm.HelmStatus(releaseName, configs.Namespace)
 		if err != nil {
-			return fmt.Errorf(color.RedString("Helm status failed: %v", err))
+			os.Exit(1)
 		}
 		return nil
 	},

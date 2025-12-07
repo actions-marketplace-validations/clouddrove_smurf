@@ -6,42 +6,39 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/fatih/color"
 	tfjson "github.com/hashicorp/terraform-json"
-	"github.com/pterm/pterm"
 )
 
-// StateList displays all resources in the Terraform state
+// StateList lists all Terraform resources currently tracked in the state file.
 func StateList(dir string) error {
 	tf, err := GetTerraform(dir)
-	spinner, err := pterm.DefaultSpinner.Start("Reading state...")
 	if err != nil {
+		Error("Failed to initialize Terraform: %v", err)
 		return err
 	}
 
 	state, err := tf.Show(context.Background())
 	if err != nil {
-		spinner.Fail("Failed to read state")
+		Error("Unable to read Terraform state: %v", err)
 		return fmt.Errorf("failed to read state: %v", err)
 	}
 
+	// No resources found
 	if state == nil || state.Values == nil || state.Values.RootModule == nil {
-		fmt.Print(color.GreenString("INFO "))
-		spinner.Success("State read successfully")
-		fmt.Println("No resources found in state.")
+		Warn("No resources found in the current Terraform state.")
 		return nil
 	}
 
+	// Collect all resource addresses
 	resources := getAllResources(state.Values.RootModule)
-
 	sort.Strings(resources)
 
+	Info("Resources found in Terraform state:")
 	for _, addr := range resources {
-		fmt.Println(addr)
+		fmt.Printf("  %s\n", addr)
 	}
 
-	spinner.Success("State read successfully")
-
+	Success("Total %d resources listed.", len(resources))
 	return nil
 }
 
@@ -52,8 +49,8 @@ func getAllResources(module *tfjson.StateModule) []string {
 	}
 
 	var addresses []string
-
 	for _, resource := range module.Resources {
+		// Skip data sources, only show managed resources
 		if !strings.HasPrefix(resource.Type, "data.") {
 			addresses = append(addresses, resource.Address)
 		}
@@ -66,10 +63,9 @@ func getAllResources(module *tfjson.StateModule) []string {
 	return addresses
 }
 
-// ErrorHandler handles CLI errors
+// ErrorHandler provides consistent CLI error output across Terraform operations.
 func ErrorHandler(err error) {
 	if err != nil {
-		errMsg := color.RedString("Error: ")
-		fmt.Printf("%s%v\n", errMsg, err)
+		Error("Command failed: %v", err)
 	}
 }

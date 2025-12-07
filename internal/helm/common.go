@@ -2,17 +2,17 @@ package helm
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/pterm/pterm"
 	"gopkg.in/yaml.v2"
-	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/release"
-	"helm.sh/helm/v3/pkg/strvals"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s.io/client-go/kubernetes"
@@ -26,14 +26,13 @@ func getKubeClient() (*kubernetes.Clientset, error) {
 	}
 	config, err := clientcmd.BuildConfigFromFlags("", settings.KubeConfig)
 	if err != nil {
-		color.Red("Failed to build Kubernetes configuration: %v \n", err)
-		return nil, err
+		pterm.Error.Println("Failed to build Kubernetes configuration: ", err)
+		return nil, fmt.Errorf("failed to build Kubernetes configuration: %v", err)
 	}
-
 	kubeClientset, err = kubernetes.NewForConfig(config)
 	if err != nil {
-		color.Red("Failed to create Kubernetes clientset: %v \n", err)
-		return nil, err
+		pterm.Error.Println("Failed to create Kubernetes clientset: ", err)
+		return nil, fmt.Errorf("failed to create Kubernetes clientset: %v", err)
 	}
 	return kubeClientset, nil
 }
@@ -43,26 +42,26 @@ func getKubeClient() (*kubernetes.Clientset, error) {
 // This function is used to provide more context to the user when an operation fails.
 // It prints the error message in red and provides suggestions based on the error type.
 func logDetailedError(operation string, err error, namespace, releaseName string) {
-	color.Red("%s FAILED: %v \n", strings.ToUpper(operation), err)
+	pterm.Error.Printfln("%s FAILED: %v \n", strings.ToUpper(operation), err)
 
 	switch {
 	case strings.Contains(err.Error(), "context deadline exceeded"):
-		color.Yellow("Timeout Suggestions: \n")
-		color.Yellow("- Increase operation timeout using the '--timeout' flag \n")
-		color.Yellow("- Check cluster resource availability and networking \n")
-		color.Yellow("- Ensure the cluster is not overloaded \n")
+		pterm.FgYellow.Printfln("Timeout Suggestions: ")
+		pterm.FgYellow.Printfln("- Increase operation timeout using the '--timeout' flag")
+		pterm.FgYellow.Printfln("- Check cluster resource availability and networking")
+		pterm.FgYellow.Printfln("- Ensure the cluster is not overloaded")
 	case strings.Contains(err.Error(), "connection refused"):
-		color.Yellow("Connection Suggestions: \n")
-		color.Yellow("- Verify cluster connectivity \n")
-		color.Yellow("- Check the kubeconfig file and cluster endpoint \n")
-		color.Yellow("- Ensure the Kubernetes API server is reachable \n")
+		pterm.FgYellow.Printfln("Connection Suggestions: ")
+		pterm.FgYellow.Printfln("- Verify cluster connectivity ")
+		pterm.FgYellow.Printfln("- Check the kubeconfig file and cluster endpoint ")
+		pterm.FgYellow.Printfln("- Ensure the Kubernetes API server is reachable ")
 	case strings.Contains(err.Error(), "no matches for kind"),
 		strings.Contains(err.Error(), "failed to create"),
 		strings.Contains(err.Error(), "YAML parse error"):
-		color.Yellow("Chart/Configuration Suggestions: \n")
-		color.Yellow("- Run 'helm lint' on your chart to detect errors. \n")
-		color.Yellow("- Check if your CRDs or resources exist on the cluster. \n")
-		color.Yellow("- Validate your values files for incorrect syntax. \n")
+		pterm.FgYellow.Printfln("Chart/Configuration Suggestions: \n")
+		pterm.FgYellow.Printfln("- Run 'helm lint' on your chart to detect errors. \n")
+		pterm.FgYellow.Printfln("- Check if your CRDs or resources exist on the cluster. \n")
+		pterm.FgYellow.Printfln("- Validate your values files for incorrect syntax. \n")
 	}
 
 	describeFailedResources(namespace, releaseName)
@@ -71,12 +70,16 @@ func logDetailedError(operation string, err error, namespace, releaseName string
 // debugLog prints a debug log message to the console.
 // This function is used for debugging purposes to print additional information during execution
 func debugLog(format string, v ...interface{}) {
-	fmt.Printf(format, v...)
-	fmt.Println()
+	pterm.Debug.Printf(format, v...)
 }
 
-// ensureNamespace checks if the specified namespace exists and creates it if it does not.
-// If the 'create' flag is set to false, it returns an error if the namespace does not exist.
+// logOperation prints consistent operation logs with timing
+func logOperation(debug bool, operation string, args ...interface{}) {
+	if debug {
+		pterm.Info.Printf("[%s] %s\n", time.Now().Format("15:04:05.000"), fmt.Sprintf(operation, args...))
+	}
+}
+
 func ensureNamespace(namespace string, create bool) error {
 	clientset, err := getKubeClient()
 	if err != nil {
@@ -85,109 +88,83 @@ func ensureNamespace(namespace string, create bool) error {
 
 	_, err = clientset.CoreV1().Namespaces().Get(context.Background(), namespace, metav1.GetOptions{})
 	if err == nil {
-		color.Green("Namespace '%s' already exists.  \n", namespace)
 		return nil
 	}
-
-	if create {
-		ns := &corev1.Namespace{
-			ObjectMeta: metav1.ObjectMeta{Name: namespace},
+	if apierrors.IsNotFound(err) {
+		if create {
+			ns := &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{Name: namespace},
+			}
+			_, err = clientset.CoreV1().Namespaces().Create(context.Background(), ns, metav1.CreateOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to create namespace '%s': %v", namespace, err)
+			}
+			return nil
 		}
-		_, err = clientset.CoreV1().Namespaces().Create(context.Background(), ns, metav1.CreateOptions{})
-		if err != nil {
-			color.Red("Failed to create namespace '%s': %v \n", namespace, err)
-			return fmt.Errorf("failed to create namespace '%s': %v \n", namespace, err)
-		}
-		color.Green("Namespace '%s' created successfully. \n", namespace)
-	} else {
-		return fmt.Errorf("namespace '%s' does not exist and was not created \n", namespace)
+		return fmt.Errorf("namespace '%s' does not exist and was not created", namespace)
 	}
 
-	return nil
+	// Unknown error
+	return fmt.Errorf("error checking namespace '%s': %v", namespace, err)
 }
 
-// loadAndMergeValues loads values from the specified files and merges them into a single map.
-// It returns the merged values map or an error if the values cannot be loaded.
-func loadAndMergeValues(valuesFiles []string) (map[string]interface{}, error) {
-	vals := make(map[string]interface{})
-	for _, f := range valuesFiles {
-		color.Green("Loading values from file: %s \n", f)
-		additionalVals, err := chartutil.ReadValuesFile(f)
-		if err != nil {
-			color.Red("Error reading values file %s: %v \n", f, err)
-			return nil, err
+func mergeMaps(a, b map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(a))
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		if vMap, ok := v.(map[string]interface{}); ok {
+			if bv, ok := out[k]; ok {
+				if bvMap, ok := bv.(map[string]interface{}); ok {
+					out[k] = mergeMaps(bvMap, vMap)
+					continue
+				}
+			}
 		}
-		for key, value := range additionalVals {
-			vals[key] = value
-		}
+		out[k] = v
 	}
-	return vals, nil
-}
-
-// loadAndMergeValuesWithSets loads values from the specified files and merges them with the set values.
-// It returns the merged values map or an error if the values cannot be loaded or parsed.
-// The set values are applied after loading the values from the files.
-func loadAndMergeValuesWithSets(valuesFiles, setValues, setLiteralValues []string) (map[string]interface{}, error) {
-	// Debugging: Print parsed arguments
-	color.Yellow("Values files provided: %v", valuesFiles)
-	color.Yellow("--set values provided: %v", setValues)
-	color.Yellow("--set-literal values provided: %v", setLiteralValues)
-
-	// Ensure that valuesFiles are correctly handled
-	if len(valuesFiles) == 0 {
-		color.Red("")
-	}
-
-	// Load values from files
-	vals, err := loadAndMergeValues(valuesFiles)
-	if err != nil {
-		return nil, err
-	}
-
-	// Process --set values (structured data)
-	for _, set := range setValues {
-		color.Green("Parsing --set value: %s", set)
-		if err := strvals.ParseInto(set, vals); err != nil {
-			color.Red("Error parsing --set value '%s': %v", set, err)
-			return nil, err
-		}
-	}
-
-	// Ensure --set-literal does not contain values files
-	cleanedSetLiteralValues := []string{}
-	for _, setLiteral := range setLiteralValues {
-		if strings.HasSuffix(setLiteral, ".yaml") || strings.HasSuffix(setLiteral, ".yml") {
-			color.Red("")
-			continue
-		}
-		cleanedSetLiteralValues = append(cleanedSetLiteralValues, setLiteral)
-	}
-
-	// Process cleaned --set-literal values (always as string)
-	for _, setLiteral := range cleanedSetLiteralValues {
-		color.Green("Parsing --set-literal value: %s", setLiteral)
-		if err := strvals.ParseIntoString(setLiteral, vals); err != nil {
-			color.Red("Error parsing --set-literal value '%s': %v", setLiteral, err)
-			return nil, err
-		}
-	}
-
-	return vals, nil
+	return out
 }
 
 // printReleaseInfo prints detailed information about the specified Helm release.
-func printReleaseInfo(rel *release.Release) {
-	color.Cyan("----- RELEASE INFO ----- \n")
-	color.Green("NAME: %s \n", rel.Name)
-	color.Green("CHART: %s-%s \n", rel.Chart.Metadata.Name, rel.Chart.Metadata.Version)
-	color.Green("NAMESPACE: %s \n", rel.Namespace)
-	color.Green("LAST DEPLOYED: %s \n", rel.Info.LastDeployed)
-	color.Green("STATUS: %s \n", rel.Info.Status)
-	color.Green("REVISION: %d \n", rel.Version)
-	if rel.Info.Notes != "" {
-		color.Green("NOTES:\n%s \n", rel.Info.Notes)
+func printReleaseInfo(rel *release.Release, debug bool) {
+	logOperation(debug, "Printing release info for %s", rel.Name)
+
+	// Clean header with release name
+	pterm.Println()
+	pterm.Printf("%s %s\n\n",
+		pterm.Bold.Sprint("RELEASE :"),
+		pterm.Cyan(rel.Name))
+
+	// Release information in a clean table
+	releaseTable := pterm.TableData{
+		{"NAME", rel.Name},
+		{"CHART", fmt.Sprintf("%s-%s", rel.Chart.Metadata.Name, rel.Chart.Metadata.Version)},
+		{"NAMESPACE", rel.Namespace},
+		{"LAST DEPLOYED", rel.Info.LastDeployed.Format("2006-01-02 15:04:05")},
+		{"STATUS", string(rel.Info.Status)},
+		{"REVISION", fmt.Sprintf("%d", rel.Version)},
 	}
-	color.Cyan("------------------------ \n")
+
+	pterm.DefaultTable.
+		WithBoxed(true).
+		WithHeaderStyle(pterm.NewStyle(pterm.Bold)).
+		WithLeftAlignment().
+		WithData(releaseTable).
+		Render()
+
+	// Application notes section (completely separate from table)
+	if rel.Info.Notes != "" {
+		pterm.Println("\n" + pterm.DefaultSection.
+			WithLevel(2).
+			WithStyle(pterm.NewStyle(pterm.Bold)).
+			Sprint("NOTES : "))
+
+		// Print raw notes without table formatting
+		fmt.Println(rel.Info.Notes)
+	}
+	pterm.Println()
 }
 
 // convertToMapStringInterface converts an interface{} to a map[string]interface{} recursively.
@@ -224,6 +201,7 @@ func parseResourcesFromManifest(manifest string) ([]Resource, error) {
 		var rawObj interface{}
 		err := yaml.Unmarshal([]byte(doc), &rawObj)
 		if err != nil {
+			pterm.Error.Printfln("failed to parse manifest: %v", err)
 			return nil, fmt.Errorf("failed to parse manifest: %v", err)
 		}
 
@@ -242,277 +220,6 @@ func parseResourcesFromManifest(manifest string) ([]Resource, error) {
 	return resources, nil
 }
 
-// printResourcesFromRelease prints detailed information about the Kubernetes resources created by the Helm release.
-// It fetches detailed information about the resources from the Kubernetes API and prints it to the console.
-func printResourcesFromRelease(rel *release.Release) {
-	resources, err := parseResourcesFromManifest(rel.Manifest)
-	if err != nil {
-		color.Red("Error parsing manifest: %v \n", err)
-		return
-	}
-
-	if len(resources) == 0 {
-		color.Green("No Kubernetes resources were created by this release.\n")
-		return
-	}
-
-	color.Cyan("----- RESOURCES ----- \n")
-
-	clientset, getClientErr := getKubeClient()
-	if getClientErr != nil {
-		color.Red("Error getting kube client for detailed resource info: %v \n", getClientErr)
-		for _, r := range resources {
-			color.Green("%s: %s \n", r.Kind, r.Name)
-		}
-		color.Cyan("-------------------------------- \n")
-		return
-	}
-
-	for _, r := range resources {
-		switch r.Kind {
-		case "Deployment":
-			dep, err := clientset.AppsV1().Deployments(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-			if err != nil {
-				color.Red("%s: %s (Failed to get details: %v) \n", r.Kind, r.Name, err)
-				continue
-			}
-			color.Green("Deployment: %s \n", r.Name)
-			color.Green("- Desired Replicas: %d \n", *dep.Spec.Replicas)
-			color.Green("- Ready Replicas:   %d \n", dep.Status.ReadyReplicas)
-
-		case "ReplicaSet":
-			rs, err := clientset.AppsV1().ReplicaSets(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-			if err != nil {
-				color.Red("%s: %s (Failed to get details: %v) \n", r.Kind, r.Name, err)
-				continue
-			}
-			color.Green("ReplicaSet: %s \n", r.Name)
-			color.Green("- Desired Replicas: %d \n", *rs.Spec.Replicas)
-			color.Green("- Current Replicas: %d \n", rs.Status.Replicas)
-			color.Green("- Ready Replicas:   %d \n", rs.Status.ReadyReplicas)
-
-		case "StatefulSet":
-			ss, err := clientset.AppsV1().StatefulSets(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-			if err != nil {
-				color.Red("%s: %s (Failed to get details: %v) \n", r.Kind, r.Name, err)
-				continue
-			}
-			color.Green("StatefulSet: %s \n", r.Name)
-			color.Green("- Desired Replicas: %d \n", *ss.Spec.Replicas)
-			color.Green("- Current Replicas: %d \n", ss.Status.CurrentReplicas)
-			color.Green("- Ready Replicas:   %d \n", ss.Status.ReadyReplicas)
-
-		case "DaemonSet":
-			ds, err := clientset.AppsV1().DaemonSets(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-			if err != nil {
-				color.Red("%s: %s (Failed to get details: %v) \n", r.Kind, r.Name, err)
-				continue
-			}
-			color.Green("DaemonSet: %s \n", r.Name)
-			color.Green("- Desired Number Scheduled: %d \n", ds.Status.DesiredNumberScheduled)
-			color.Green("- Number Scheduled:         %d \n", ds.Status.CurrentNumberScheduled)
-			color.Green("- Number Ready:             %d \n", ds.Status.NumberReady)
-
-		case "Pod":
-			pod, err := clientset.CoreV1().Pods(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-			if err != nil {
-				color.Red("%s: %s (Failed to get details: %v) \n", r.Kind, r.Name, err)
-				continue
-			}
-			color.Green("Pod: %s \n", r.Name)
-			color.Green("- Phase: %s \n", pod.Status.Phase)
-			ready := false
-			for _, cond := range pod.Status.Conditions {
-				if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-					ready = true
-					break
-				}
-			}
-			color.Green("- Ready: %v \n", ready)
-			color.Green("- IP: %s \n", pod.Status.PodIP)
-			for _, cs := range pod.Status.ContainerStatuses {
-				color.Green("  Container: %s \n", cs.Name)
-				if cs.State.Waiting != nil {
-					color.Red("    State: Waiting \n")
-					color.Red("    Reason: %s \n", cs.State.Waiting.Reason)
-					color.Red("    Message: %s \n", cs.State.Waiting.Message)
-				}
-				if cs.State.Terminated != nil {
-					color.Red("    State: Terminated \n")
-					color.Red("    Reason: %s \n", cs.State.Terminated.Reason)
-					color.Red("    Message: %s \n", cs.State.Terminated.Message)
-				}
-				if cs.State.Running != nil {
-					color.Green("    State: Running \n")
-					color.Green("    Started at: %s \n", cs.State.Running.StartedAt)
-				}
-				color.Green("    Ready: %v \n", cs.Ready)
-				color.Green("    Restart Count: %d \n", cs.RestartCount)
-			}
-
-		case "Service":
-			svc, err := clientset.CoreV1().Services(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-			if err != nil {
-				color.Red("%s: %s (Failed to get details: %v) \n", r.Kind, r.Name, err)
-				continue
-			}
-			color.Green("Service: %s \n", r.Name)
-			color.Green("- Type: %s \n", svc.Spec.Type)
-			color.Green("- ClusterIP: %s \n", svc.Spec.ClusterIP)
-			if len(svc.Spec.Ports) > 0 {
-				for _, p := range svc.Spec.Ports {
-					color.Green("- Port: %d (Protocol: %s, TargetPort: %v) \n", p.Port, p.Protocol, p.TargetPort)
-				}
-			}
-
-		case "ServiceAccount":
-			sa, err := clientset.CoreV1().ServiceAccounts(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-			if err != nil {
-				color.Red("%s: %s (Failed to get details: %v) \n", r.Kind, r.Name, err)
-				continue
-			}
-			color.Green("ServiceAccount: %s \n", r.Name)
-			color.Green("- CreationTimestamp: %s \n", sa.CreationTimestamp.String())
-
-		case "ConfigMap":
-			cm, err := clientset.CoreV1().ConfigMaps(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-			if err != nil {
-				color.Red("%s: %s (Failed to get details: %v) \n", r.Kind, r.Name, err)
-				continue
-			}
-			color.Green("ConfigMap: %s \n", r.Name)
-			color.Green("- Data keys: %d \n", len(cm.Data))
-
-		case "Secret":
-			secret, err := clientset.CoreV1().Secrets(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-			if err != nil {
-				color.Red("%s: %s (Failed to get details: %v) \n", r.Kind, r.Name, err)
-				continue
-			}
-			color.Green("Secret: %s \n", r.Name)
-			color.Green("- Type: %s \n", secret.Type)
-			color.Green("- Data keys: %d \n", len(secret.Data))
-
-		case "Namespace":
-			ns, err := clientset.CoreV1().Namespaces().Get(context.Background(), r.Name, metav1.GetOptions{})
-			if err != nil {
-				color.Red("%s: %s (Failed to get details: %v) \n", r.Kind, r.Name, err)
-				continue
-			}
-			color.Green("Namespace: %s \n", r.Name)
-			color.Green("- Status: %s \n", ns.Status.Phase)
-
-		default:
-			color.Green("%s: %s \n", r.Kind, r.Name)
-		}
-	}
-
-	color.Cyan("----- PODS ASSOCIATED WITH THE RELEASE ----- \n")
-	podList, err := clientset.CoreV1().Pods(rel.Namespace).List(context.Background(), metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("app.kubernetes.io/instance=%s", rel.Name),
-	})
-	if err != nil {
-		color.Red("Error listing pods for release '%s': %v \n", rel.Name, err)
-	} else if len(podList.Items) == 0 {
-		color.Yellow("No pods found for release '%s' \n", rel.Name)
-	} else {
-		for _, pod := range podList.Items {
-			color.Green("Pod: %s \n", pod.Name)
-			color.Green("- Phase: %s \n", pod.Status.Phase)
-			ready := false
-			for _, cond := range pod.Status.Conditions {
-				if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-					ready = true
-					break
-				}
-			}
-			color.Green("- Ready: %v \n", ready)
-			color.Green("- IP: %s \n", pod.Status.PodIP)
-			for _, cs := range pod.Status.ContainerStatuses {
-				color.Green("  Container: %s \n", cs.Name)
-				if cs.State.Waiting != nil {
-					color.Red("    State: Waiting \n")
-					color.Red("    Reason: %s \n", cs.State.Waiting.Reason)
-					color.Red("    Message: %s \n", cs.State.Waiting.Message)
-				}
-				if cs.State.Terminated != nil {
-					color.Red("    State: Terminated \n")
-					color.Red("    Reason: %s \n", cs.State.Terminated.Reason)
-					color.Red("    Message: %s \n", cs.State.Terminated.Message)
-				}
-				if cs.State.Running != nil {
-					color.Green("    State: Running \n")
-					color.Green("    Started at: %s \n", cs.State.Running.StartedAt)
-				}
-				color.Green("    Ready: %v \n", cs.Ready)
-				color.Green("    Restart Count: %d \n", cs.RestartCount)
-			}
-			color.Green("- Node Name: %s \n", pod.Spec.NodeName)
-			color.Green("- Host IP: %s \n", pod.Status.HostIP)
-			color.Green("- Pod IP: %s \n", pod.Status.PodIP)
-			color.Green("- Start Time: %s \n", pod.Status.StartTime.String())
-
-			evts, err := clientset.CoreV1().Events(rel.Namespace).List(context.Background(), metav1.ListOptions{
-				FieldSelector: fmt.Sprintf("involvedObject.name=%s", pod.Name),
-			})
-			if err != nil {
-				color.Yellow("  Error fetching events for pod %s: %v \n", pod.Name, err)
-				continue
-			}
-
-			if len(evts.Items) == 0 {
-				color.Yellow("  No events found for pod %s \n", pod.Name)
-			} else {
-				color.Green("  Events for pod %s: \n", pod.Name)
-				for _, evt := range evts.Items {
-					color.Green("    %s: %s \n", evt.Reason, evt.Message)
-				}
-			}
-			color.Cyan("------------------------------------------------------- \n")
-		}
-	}
-	color.Cyan("----------------------------------------------- \n")
-}
-
-// monitorResources monitors the resources created by the Helm release until they are all ready.
-// It checks the status of the resources in the Kubernetes API and waits until they are all ready.
-// The function returns an error if the resources are not ready within the specified timeout.
-func monitorResources(rel *release.Release, namespace string, timeout time.Duration) error {
-	resources, err := parseResourcesFromManifest(rel.Manifest)
-	if err != nil {
-		return err
-	}
-
-	clientset, err := getKubeClient()
-	if err != nil {
-		return err
-	}
-
-	spinner, _ := pterm.DefaultSpinner.Start("Checking resource readiness... \n")
-	defer spinner.Stop()
-
-	deadline := time.Now().Add(timeout)
-	for {
-		allReady, notReadyResources, err := resourcesReady(clientset, namespace, resources)
-		if err != nil {
-			spinner.Fail("Error checking resources readiness \n")
-			return fmt.Errorf("error checking resources readiness: %v \n", err)
-		}
-		if allReady {
-			spinner.Success("All resources are ready. \n")
-			return nil
-		}
-		if time.Now().After(deadline) {
-			spinner.Fail("Timeout waiting for all resources to become ready \n")
-			return fmt.Errorf("timeout waiting for all resources to become ready \n")
-		}
-
-		spinner.UpdateText(fmt.Sprintf("Waiting for resources: %s \n", strings.Join(notReadyResources, ", ")))
-
-		time.Sleep(5 * time.Second)
-	}
-}
-
 // resourcesReady checks if the specified resources are ready in the Kubernetes API.
 // It returns a boolean indicating if all resources are ready, a slice of not ready resources, and an error if any.
 // The function checks the status of Deployments and Pods to determine if they are ready.
@@ -524,6 +231,7 @@ func resourcesReady(clientset *kubernetes.Clientset, namespace string, resources
 		case "Deployment":
 			dep, err := clientset.AppsV1().Deployments(namespace).Get(context.Background(), res.Name, metav1.GetOptions{})
 			if err != nil {
+				pterm.Error.Println(err)
 				return false, nil, err
 			}
 			if dep.Status.ReadyReplicas != *dep.Spec.Replicas {
@@ -532,6 +240,7 @@ func resourcesReady(clientset *kubernetes.Clientset, namespace string, resources
 		case "Pod":
 			pod, err := clientset.CoreV1().Pods(namespace).Get(context.Background(), res.Name, metav1.GetOptions{})
 			if err != nil {
+				pterm.Error.Println(err)
 				return false, nil, err
 			}
 			if pod.Status.Phase != corev1.PodRunning {
@@ -554,6 +263,7 @@ func resourcesReady(clientset *kubernetes.Clientset, namespace string, resources
 	if len(notReadyResources) == 0 {
 		return true, nil, nil
 	}
+	pterm.Info.Printfln("All resource ready...")
 	return false, notReadyResources, nil
 }
 
@@ -561,10 +271,10 @@ func resourcesReady(clientset *kubernetes.Clientset, namespace string, resources
 // It retrieves the pods associated with the release and prints their status and events for troubleshooting.
 // This function is used to provide additional context to the user when resources fail to be created or updated.
 func describeFailedResources(namespace, releaseName string) {
-	color.Cyan("----- TROUBLESHOOTING FAILED RESOURCES ----- \n")
+	pterm.FgCyan.Print("----- TROUBLESHOOTING FAILED RESOURCES ----- \n")
 	clientset, err := getKubeClient()
 	if err != nil {
-		color.Red("Error getting kube client: %v \n", err)
+		pterm.Error.Printfln("Error getting kube client: %v \n", err)
 		return
 	}
 
@@ -572,23 +282,23 @@ func describeFailedResources(namespace, releaseName string) {
 		LabelSelector: fmt.Sprintf("app.kubernetes.io/instance=%s", releaseName),
 	})
 	if err != nil {
-		color.Red("Failed to list pods for troubleshooting: %v \n", err)
+		pterm.Error.Printfln("Failed to list pods for troubleshooting: %v \n", err)
 		return
 	}
 
 	if len(podList.Items) == 0 {
-		color.Yellow("No pods found for release '%s', cannot diagnose further.\n", releaseName)
+		pterm.Warning.Printfln("No pods found for release '%s', cannot diagnose further.\n", releaseName)
 		return
 	}
 
 	for _, pod := range podList.Items {
-		color.Green("Pod: %s \n", pod.Name)
-		color.Green("Phase: %s \n", pod.Status.Phase)
+		pterm.FgGreen.Printfln("Pod: %s \n", pod.Name)
+		pterm.FgGreen.Printfln("Phase: %s \n", pod.Status.Phase)
 		for _, cs := range pod.Status.ContainerStatuses {
 			if cs.State.Waiting != nil {
-				color.Red("Container: %s is waiting with reason: %s, message: %s \n", cs.Name, cs.State.Waiting.Reason, cs.State.Waiting.Message)
+				pterm.FgRed.Printfln("Container: %s is waiting with reason: %s, message: %s \n", cs.Name, cs.State.Waiting.Reason, cs.State.Waiting.Message)
 			} else if cs.State.Terminated != nil {
-				color.Red("Container: %s is terminated with reason: %s, message: %s \n", cs.Name, cs.State.Terminated.Reason, cs.State.Terminated.Message)
+				pterm.FgRed.Printfln("Container: %s is terminated with reason: %s, message: %s \n", cs.Name, cs.State.Terminated.Reason, cs.State.Terminated.Message)
 			}
 		}
 
@@ -596,64 +306,401 @@ func describeFailedResources(namespace, releaseName string) {
 			FieldSelector: fmt.Sprintf("involvedObject.name=%s", pod.Name),
 		})
 		if err != nil {
-			color.Yellow("Error fetching events for pod %s: %v \n", pod.Name, err)
+			pterm.Warning.Printfln("Error fetching events for pod %s: %v \n", pod.Name, err)
 			continue
 		}
 
 		if len(evts.Items) == 0 {
-			color.Yellow("No events found for pod %s \n", pod.Name)
+			pterm.Warning.Printfln("No events found for pod %s \n", pod.Name)
 		} else {
-			color.Green("Events for pod %s: \n", pod.Name)
+			pterm.FgGreen.Printfln("Events for pod %s: \n", pod.Name)
 			for _, evt := range evts.Items {
-				color.Green("  %s: %s \n", evt.Reason, evt.Message)
+				pterm.FgGreen.Printfln("  %s: %s \n", evt.Reason, evt.Message)
 			}
 		}
-		color.Cyan("------------------------------------------------------- \n")
+		pterm.FgCyan.Println("-------------------------------------------------------")
 	}
-	color.Cyan("----------------------------------------------- \n")
+	pterm.FgCyan.Println("-----------------------------------------------")
 }
 
-// resourceRemoved checks if the specified resource has been removed from the Kubernetes API.
-// It returns true if the resource is not found, indicating that it has been removed.
-// This function is used to determine if a resource has been successfully deleted.
-func resourceRemoved(clientset *kubernetes.Clientset, namespace string, r Resource) bool {
-	switch r.Kind {
-	case "Deployment":
-		_, err := clientset.AppsV1().Deployments(namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-		return isNotFound(err)
-	case "Pod":
-		_, err := clientset.CoreV1().Pods(namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-		return isNotFound(err)
-	case "Service":
-		_, err := clientset.CoreV1().Services(namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-		return isNotFound(err)
-	case "ServiceAccount":
-		_, err := clientset.CoreV1().ServiceAccounts(namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-		return isNotFound(err)
-	case "ReplicaSet":
-		_, err := clientset.AppsV1().ReplicaSets(namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-		return isNotFound(err)
-	case "StatefulSet":
-		_, err := clientset.AppsV1().StatefulSets(namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-		return isNotFound(err)
-	case "DaemonSet":
-		_, err := clientset.AppsV1().DaemonSets(namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-		return isNotFound(err)
-	case "ConfigMap":
-		_, err := clientset.CoreV1().ConfigMaps(namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-		return isNotFound(err)
-	case "Secret":
-		_, err := clientset.CoreV1().Secrets(namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-		return isNotFound(err)
-	case "PersistentVolumeClaim":
-		_, err := clientset.CoreV1().PersistentVolumeClaims(namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
-		return isNotFound(err)
-	default:
-		return true
-	}
-}
-
-// isNotFound checks if the error is a "not found" error.
+// Helper functions
 func isNotFound(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "not found")
+	return err != nil && (errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "not found"))
+}
+
+// Helper function to get external IP for services
+func getExternalIP(svc *corev1.Service) string {
+	if svc.Spec.Type == corev1.ServiceTypeLoadBalancer {
+		for _, ing := range svc.Status.LoadBalancer.Ingress {
+			if ing.IP != "" {
+				return ing.IP
+			}
+			if ing.Hostname != "" {
+				return ing.Hostname
+			}
+		}
+		return "<pending>"
+	}
+	return "<none>"
+}
+
+// printResourcesFromRelease prints detailed information about the Kubernetes resources created by the Helm release.
+// It fetches detailed information about the resources from the Kubernetes API and prints it to the console.
+func printResourcesFromRelease(rel *release.Release) {
+	resources, err := parseResourcesFromManifest(rel.Manifest)
+	if err != nil {
+		pterm.Error.WithShowLineNumber(false).Printfln("Error parsing manifest: %v", err)
+		return
+	}
+
+	if len(resources) == 0 {
+		pterm.Info.Println("No Kubernetes resources were created by this release.")
+		return
+	}
+
+	// Print resources section
+	pterm.DefaultSection.Println("RESOURCES")
+
+	clientset, getClientErr := getKubeClient()
+	if getClientErr != nil {
+		pterm.Error.WithShowLineNumber(false).Printfln("Error getting kube client for detailed resource info: %v", getClientErr)
+
+		// Fallback table with basic info
+		tableData := pterm.TableData{{"Kind", "Name"}}
+		for _, r := range resources {
+			tableData = append(tableData, []string{r.Kind, r.Name})
+		}
+
+		pterm.DefaultTable.WithHasHeader(true).WithData(tableData).Render()
+		return
+	}
+
+	// Print resources in tables grouped by kind
+	for _, r := range resources {
+		switch r.Kind {
+		case "Deployment":
+			dep, err := clientset.AppsV1().Deployments(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
+			if err != nil {
+				pterm.Warning.Printfln("%s/%s: Failed to get details: %v", r.Kind, r.Name, err)
+				continue
+			}
+
+			pterm.DefaultSection.Printf("%s: %s", r.Kind, r.Name)
+
+			tableData := pterm.TableData{
+				{"REPLICAS", fmt.Sprint(*dep.Spec.Replicas)},
+				{"DESIRED", fmt.Sprint(dep.Status.Replicas)},
+				{"READY", fmt.Sprint(dep.Status.ReadyReplicas)},
+				{"UPDATED", fmt.Sprint(dep.Status.UpdatedReplicas)},
+				{"AVAILABLE", fmt.Sprint(dep.Status.AvailableReplicas)},
+			}
+
+			pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(tableData).Render()
+
+		case "ReplicaSet":
+			rs, err := clientset.AppsV1().ReplicaSets(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
+			if err != nil {
+				pterm.Warning.Printfln("%s/%s: Failed to get details: %v", r.Kind, r.Name, err)
+				continue
+			}
+
+			pterm.DefaultSection.Printf("%s: %s", r.Kind, r.Name)
+
+			tableData := pterm.TableData{
+				{"REPLICAS", fmt.Sprint(*rs.Spec.Replicas)},
+				{"DESIRED", fmt.Sprint(rs.Status.Replicas)},
+				{"READY", fmt.Sprint(rs.Status.ReadyReplicas)},
+			}
+
+			pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(tableData).Render()
+
+		case "StatefulSet":
+			ss, err := clientset.AppsV1().StatefulSets(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
+			if err != nil {
+				pterm.Warning.Printfln("%s/%s: Failed to get details: %v", r.Kind, r.Name, err)
+				continue
+			}
+
+			pterm.DefaultSection.Printf("%s: %s", r.Kind, r.Name)
+
+			tableData := pterm.TableData{
+				{"REPLICAS", fmt.Sprint(*ss.Spec.Replicas)},
+				{"CURRENT", fmt.Sprint(ss.Status.CurrentReplicas)},
+				{"READY", fmt.Sprint(ss.Status.ReadyReplicas)},
+			}
+
+			pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(tableData).Render()
+
+		case "DaemonSet":
+			ds, err := clientset.AppsV1().DaemonSets(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
+			if err != nil {
+				pterm.Warning.Printfln("%s/%s: Failed to get details: %v", r.Kind, r.Name, err)
+				continue
+			}
+
+			pterm.DefaultSection.Printf("%s: %s", r.Kind, r.Name)
+
+			tableData := pterm.TableData{
+				{"DESIRED", fmt.Sprint(ds.Status.DesiredNumberScheduled)},
+				{"CURRENT", fmt.Sprint(ds.Status.CurrentNumberScheduled)},
+				{"READY", fmt.Sprint(ds.Status.NumberReady)},
+				{"UPDATED", fmt.Sprint(ds.Status.UpdatedNumberScheduled)},
+				{"AVAILABLE", fmt.Sprint(ds.Status.NumberAvailable)},
+			}
+
+			pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(tableData).Render()
+
+		case "Pod":
+			pod, err := clientset.CoreV1().Pods(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
+			if err != nil {
+				pterm.Warning.Printfln("%s/%s: Failed to get details: %v", r.Kind, r.Name, err)
+				continue
+			}
+
+			pterm.DefaultSection.Printf("%s: %s", r.Kind, r.Name)
+
+			ready := false
+			for _, cond := range pod.Status.Conditions {
+				if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+					ready = true
+					break
+				}
+			}
+
+			podTable := pterm.TableData{
+				{"PHASE", string(pod.Status.Phase)},
+				{"READY", fmt.Sprint(ready)},
+				{"NODE", pod.Spec.NodeName},
+				{"POD IP", pod.Status.PodIP},
+				{"START TIME", pod.Status.StartTime.Format(time.RFC1123)},
+			}
+
+			pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(podTable).Render()
+
+			// Containers table
+			if len(pod.Status.ContainerStatuses) > 0 {
+				pterm.Println()
+				pterm.Info.Println("Containers:")
+
+				for _, cs := range pod.Status.ContainerStatuses {
+					state := ""
+					if cs.State.Waiting != nil {
+						state = fmt.Sprintf("Waiting (%s)", cs.State.Waiting.Reason)
+					} else if cs.State.Terminated != nil {
+						state = fmt.Sprintf("Terminated (%s)", cs.State.Terminated.Reason)
+					} else if cs.State.Running != nil {
+						state = fmt.Sprintf("Running (since %s)", cs.State.Running.StartedAt.Format(time.RFC1123))
+					}
+
+					containerTable := pterm.TableData{
+						{"NAME", cs.Name},
+						{"READY", fmt.Sprint(cs.Ready)},
+						{"STATE", state},
+						{"RESTARTS", fmt.Sprint(cs.RestartCount)},
+						{"IMAGE", cs.Image},
+					}
+
+					pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(containerTable).Render()
+				}
+			}
+
+		case "Service":
+			svc, err := clientset.CoreV1().Services(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
+			if err != nil {
+				pterm.Warning.Printfln("%s/%s: Failed to get details: %v", r.Kind, r.Name, err)
+				continue
+			}
+
+			pterm.DefaultSection.Printf("%s: %s", r.Kind, r.Name)
+
+			serviceTable := pterm.TableData{
+				{"TYPE", string(svc.Spec.Type)},
+				{"CLUSTER-IP", svc.Spec.ClusterIP},
+				{"EXTERNAL-IP", getExternalIP(svc)},
+				{"AGE", time.Since(svc.CreationTimestamp.Time).Round(time.Second).String()},
+			}
+
+			pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(serviceTable).Render()
+
+			// Ports
+			if len(svc.Spec.Ports) > 0 {
+				pterm.Println()
+				pterm.Info.Println("Ports:")
+
+				for _, p := range svc.Spec.Ports {
+					nodePort := ""
+					if p.NodePort > 0 {
+						nodePort = fmt.Sprint(p.NodePort)
+					}
+
+					portsTable := pterm.TableData{
+						{"NAME", p.Name},
+						{"PORT", fmt.Sprint(p.Port)},
+						{"TARGET PORT", p.TargetPort.String()},
+						{"PROTOCOL", string(p.Protocol)},
+						{"NODE PORT", nodePort},
+					}
+
+					pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(portsTable).Render()
+				}
+			}
+
+		case "ServiceAccount":
+			sa, err := clientset.CoreV1().ServiceAccounts(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
+			if err != nil {
+				pterm.Warning.Printfln("%s/%s: Failed to get details: %v", r.Kind, r.Name, err)
+				continue
+			}
+
+			pterm.DefaultSection.Printf("%s: %s", r.Kind, r.Name)
+
+			tableData := pterm.TableData{
+				{"SECRETS", fmt.Sprint(len(sa.Secrets))},
+				{"AGE", time.Since(sa.CreationTimestamp.Time).Round(time.Second).String()},
+			}
+
+			pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(tableData).Render()
+
+		case "ConfigMap":
+			cm, err := clientset.CoreV1().ConfigMaps(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
+			if err != nil {
+				pterm.Warning.Printfln("%s/%s: Failed to get details: %v", r.Kind, r.Name, err)
+				continue
+			}
+
+			pterm.DefaultSection.Printf("%s: %s", r.Kind, r.Name)
+
+			tableData := pterm.TableData{
+				{"DATA", fmt.Sprint(len(cm.Data))},
+				{"BINARY DATA", fmt.Sprint(len(cm.BinaryData))},
+				{"AGE", time.Since(cm.CreationTimestamp.Time).Round(time.Second).String()},
+			}
+
+			pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(tableData).Render()
+
+		case "Secret":
+			secret, err := clientset.CoreV1().Secrets(rel.Namespace).Get(context.Background(), r.Name, metav1.GetOptions{})
+			if err != nil {
+				pterm.Warning.Printfln("%s/%s: Failed to get details: %v", r.Kind, r.Name, err)
+				continue
+			}
+
+			pterm.DefaultSection.Printf("%s: %s", r.Kind, r.Name)
+
+			tableData := pterm.TableData{
+				{"TYPE", string(secret.Type)},
+				{"DATA", fmt.Sprint(len(secret.Data))},
+				{"AGE", time.Since(secret.CreationTimestamp.Time).Round(time.Second).String()},
+			}
+
+			pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(tableData).Render()
+
+		case "Namespace":
+			ns, err := clientset.CoreV1().Namespaces().Get(context.Background(), r.Name, metav1.GetOptions{})
+			if err != nil {
+				pterm.Warning.Printfln("%s/%s: Failed to get details: %v", r.Kind, r.Name, err)
+				continue
+			}
+
+			pterm.DefaultSection.Printf("%s: %s", r.Kind, r.Name)
+
+			tableData := pterm.TableData{
+				{"STATUS", string(ns.Status.Phase)},
+				{"AGE", time.Since(ns.CreationTimestamp.Time).Round(time.Second).String()},
+			}
+
+			pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(tableData).Render()
+
+		default:
+			pterm.DefaultSection.Printf("%s: %s", r.Kind, r.Name)
+			pterm.Info.Println("No additional details available for this resource type")
+		}
+
+		pterm.Println()
+	}
+
+	// Print pods section
+	pterm.DefaultSection.Println("PODS ASSOCIATED WITH THE RELEASE")
+
+	podList, err := clientset.CoreV1().Pods(rel.Namespace).List(context.Background(), metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("app.kubernetes.io/instance=%s", rel.Name),
+	})
+	if err != nil {
+		pterm.Error.WithShowLineNumber(false).Printfln("Error listing pods for release '%s': %v", rel.Name, err)
+	} else if len(podList.Items) == 0 {
+		pterm.Warning.Printf("No pods found for release '%s'\n", rel.Name)
+	} else {
+		for _, pod := range podList.Items {
+			pterm.DefaultSection.Printf("Pod: %s", pod.Name)
+
+			ready := false
+			for _, cond := range pod.Status.Conditions {
+				if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+					ready = true
+					break
+				}
+			}
+
+			podTable := pterm.TableData{
+				{"PHASE", string(pod.Status.Phase)},
+				{"READY", fmt.Sprint(ready)},
+				{"NODE", pod.Spec.NodeName},
+				{"POD IP", pod.Status.PodIP},
+				{"START TIME", pod.Status.StartTime.Format(time.RFC1123)},
+			}
+
+			pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(podTable).Render()
+
+			// Containers
+			if len(pod.Status.ContainerStatuses) > 0 {
+				pterm.Println()
+				pterm.Info.Println("Containers:")
+
+				for _, cs := range pod.Status.ContainerStatuses {
+					state := ""
+					if cs.State.Waiting != nil {
+						state = fmt.Sprintf("Waiting (%s)", cs.State.Waiting.Reason)
+					} else if cs.State.Terminated != nil {
+						state = fmt.Sprintf("Terminated (%s)", cs.State.Terminated.Reason)
+					} else if cs.State.Running != nil {
+						state = fmt.Sprintf("Running (since %s)", cs.State.Running.StartedAt.Format(time.RFC1123))
+					}
+
+					containerTable := pterm.TableData{
+						{"NAME", cs.Name},
+						{"READY", fmt.Sprint(cs.Ready)},
+						{"STATE", state},
+						{"RESTARTS", fmt.Sprint(cs.RestartCount)},
+						{"IMAGE", cs.Image},
+					}
+
+					pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(containerTable).Render()
+				}
+			}
+
+			// Events
+			evts, err := clientset.CoreV1().Events(rel.Namespace).List(context.Background(), metav1.ListOptions{
+				FieldSelector: fmt.Sprintf("involvedObject.name=%s", pod.Name),
+			})
+			if err != nil {
+				pterm.Warning.Printf("Error fetching events for pod %s: %v\n", pod.Name, err)
+			} else if len(evts.Items) > 0 {
+				pterm.Println()
+				pterm.Info.Println("Events:")
+
+				for _, evt := range evts.Items {
+					eventsTable := pterm.TableData{
+						{"LAST SEEN", time.Since(evt.LastTimestamp.Time).Round(time.Second).String() + " ago"},
+						{"TYPE", evt.Type},
+						{"REASON", evt.Reason},
+						{"MESSAGE", evt.Message},
+					}
+
+					pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(eventsTable).Render()
+				}
+			}
+
+			pterm.Println()
+		}
+	}
 }

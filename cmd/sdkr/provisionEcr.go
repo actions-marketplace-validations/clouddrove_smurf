@@ -20,9 +20,10 @@ import (
 // It relies on config defaults or command-line flags for region, repository,
 // and other Docker build settings.
 var provisionEcrCmd = &cobra.Command{
-	Use:   "provision-ecr [IMAGE_NAME[:TAG]]",
-	Short: "Buildand push a Docker image to AWS ECR.",
-	Args:  cobra.MaximumNArgs(1),
+	Use:          "provision-ecr [IMAGE_NAME[:TAG]]",
+	Short:        "Buildand push a Docker image to AWS ECR.",
+	Args:         cobra.MaximumNArgs(1),
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var imageRef string
 		if len(args) == 1 {
@@ -40,7 +41,7 @@ var provisionEcrCmd = &cobra.Command{
 
 		localImageName, localTag, parseErr := configs.ParseImage(imageRef)
 		if parseErr != nil {
-			return fmt.Errorf("invalid image format: %w", parseErr)
+			return fmt.Errorf("invalid image format: %v", parseErr)
 		}
 
 		if localTag == "" {
@@ -87,12 +88,9 @@ var provisionEcrCmd = &cobra.Command{
 			Timeout:        time.Duration(configs.BuildTimeout) * time.Second,
 		}
 
-		pterm.Info.Println("Starting ECR build...")
 		if err := docker.Build(localImageName, localTag, buildOpts); err != nil {
-			pterm.Error.Println("Build failed:", err)
-			return err
+			return fmt.Errorf("build failed: %v", err)
 		}
-		pterm.Success.Println("Build completed successfully.")
 
 		pushImage := imageRef
 		if pushImage == "" {
@@ -107,7 +105,7 @@ var provisionEcrCmd = &cobra.Command{
 
 		accountID, ecrRegionName, ecrRepositoryName, ecrImageTag, parseErr := configs.ParseEcrImageRef(imageRef)
 		if parseErr != nil {
-			return fmt.Errorf("invalid image format: %w", parseErr)
+			return parseErr
 		}
 
 		if accountID == "" || ecrRegionName == "" || ecrRepositoryName == "" || ecrImageTag == "" {
@@ -118,7 +116,6 @@ var provisionEcrCmd = &cobra.Command{
 		)
 		pterm.Info.Printf("Pushing image %s to ECR...\n", pushImage)
 		if err := docker.PushImageToECR(ecrImage, ecrRegionName, ecrRepositoryName); err != nil {
-			pterm.Error.Println("Push to ECR failed:", err)
 			return err
 		}
 		pterm.Success.Println("Push to ECR completed successfully.")
@@ -126,7 +123,6 @@ var provisionEcrCmd = &cobra.Command{
 		if configs.DeleteAfterPush {
 			pterm.Info.Printf("Deleting local image %s...\n", fullEcrImage)
 			if err := docker.RemoveImage(fullEcrImage); err != nil {
-				pterm.Error.Println("Failed to delete local image:", err)
 				return err
 			}
 			pterm.Success.Println("Successfully deleted local image:", fullEcrImage)

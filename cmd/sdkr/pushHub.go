@@ -24,7 +24,8 @@ Push Docker images to Docker Hub.
 Export DOCKER_USERNAME and DOCKER_PASSWORD as environment variables for Docker Hub authentication, for example:
   export DOCKER_USERNAME="your-username"
   export DOCKER_PASSWORD="your-password"`,
-	Args: cobra.MaximumNArgs(1),
+	Args:         cobra.MaximumNArgs(1),
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var imageRef string
 		var envVars map[string]string
@@ -37,6 +38,7 @@ Export DOCKER_USERNAME and DOCKER_PASSWORD as environment variables for Docker H
 				return err
 			}
 			if data.Sdkr.ImageName == "" {
+				pterm.Error.Printfln("image name (with optional tag) must be provided either as an argument or in the config")
 				return errors.New("image name (with optional tag) must be provided either as an argument or in the config")
 			}
 			imageRef = data.Sdkr.ImageName
@@ -45,7 +47,7 @@ Export DOCKER_USERNAME and DOCKER_PASSWORD as environment variables for Docker H
 		if os.Getenv("DOCKER_USERNAME") == "" && os.Getenv("DOCKER_PASSWORD") == "" {
 			data, err := configs.LoadConfig(configs.FileName)
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
 			envVars = map[string]string{
@@ -58,16 +60,17 @@ Export DOCKER_USERNAME and DOCKER_PASSWORD as environment variables for Docker H
 			}
 		}
 
-		if os.Getenv("DOCKER_USERNAME") == "" || os.Getenv("DOCKER_PASSWORD") == "" {
-			pterm.Error.Println("Docker Hub credentials are required")
+		if os.Getenv("DOCKER_PASSWORD") == "" || os.Getenv("DOCKER_PASSWORD") == "" {
+			pterm.Error.Println("ired")
 			return errors.New("missing required Docker Hub credentials")
 		}
 
 		repoName, tag, parseErr := configs.ParseImage(imageRef)
 		if parseErr != nil {
-			return fmt.Errorf("invalid image format: %w", parseErr)
+			return parseErr
 		}
 		if repoName == "" {
+			pterm.Error.Println("invalid image reference")
 			return errors.New("invalid image reference")
 		}
 		if tag == "" {
@@ -90,7 +93,6 @@ Export DOCKER_USERNAME and DOCKER_PASSWORD as environment variables for Docker H
 		if configs.DeleteAfterPush {
 			pterm.Info.Printf("Deleting local image %s...\n", fullImageName)
 			if err := docker.RemoveImage(fullImageName); err != nil {
-				pterm.Error.Println("Failed to delete local image:", err)
 				return err
 			}
 			pterm.Success.Println("Successfully deleted local image:", fullImageName)

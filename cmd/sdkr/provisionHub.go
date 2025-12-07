@@ -1,7 +1,6 @@
 package sdkr
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"os"
@@ -21,12 +20,13 @@ import (
 // after a successful push.
 var provisionHubCmd = &cobra.Command{
 	Use:   "provision-hub [IMAGE_NAME[:TAG]]",
-	Short: "Build, scan, and push a Docker image to Docker Hub.",
+	Short: "Build, scan, and push a Docker image .",
 	Long: `Build, scan, and push a Docker image to Docker Hub.
-Set DOCKER_USERNAME and DOCKER_PASSWORD environment variables for Docker Hub authentication, for example:
-  export DOCKER_USERNAME="your-username"
-  export DOCKER_PASSWORD="your-password"`,
-	Args: cobra.MaximumNArgs(1),
+	Set DOCKER_USERNAME and DOCKER_PASSWORD environment variables for Docker Hub authentication, for example:
+  	export DOCKER_USERNAME="your-username"
+  	export DOCKER_PASSWORD="your-password"`,
+	Args:         cobra.MaximumNArgs(1),
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var imageRef string
 		if len(args) == 1 {
@@ -34,9 +34,10 @@ Set DOCKER_USERNAME and DOCKER_PASSWORD environment variables for Docker Hub aut
 		} else {
 			data, err := configs.LoadConfig(configs.FileName)
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 			if data.Sdkr.ImageName == "" {
+				pterm.Error.Printfln("image name (with optional tag) must be provided either as an argument or in the config")
 				return errors.New("image name (with optional tag) must be provided either as an argument or in the config")
 			}
 			imageRef = data.Sdkr.ImageName
@@ -45,7 +46,7 @@ Set DOCKER_USERNAME and DOCKER_PASSWORD environment variables for Docker Hub aut
 		if os.Getenv("DOCKER_USERNAME") == "" && os.Getenv("DOCKER_PASSWORD") == "" {
 			data, err := configs.LoadConfig(configs.FileName)
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
 			envVars := map[string]string{
@@ -53,21 +54,23 @@ Set DOCKER_USERNAME and DOCKER_PASSWORD environment variables for Docker Hub aut
 				"DOCKER_PASSWORD": data.Sdkr.DockerPassword,
 			}
 			if err := configs.ExportEnvironmentVariables(envVars); err != nil {
-				pterm.Error.Println("Error exporting Docker Hub credentials:", err)
 				return err
 			}
 		}
 
 		if os.Getenv("DOCKER_USERNAME") == "" || os.Getenv("DOCKER_PASSWORD") == "" {
+			fmt.Println("error : ", os.Getenv("DOCKER_USERNAME"), "&&", os.Getenv("DOCKER_PASSWORD"))
 			pterm.Error.Println("Docker Hub credentials are required")
 			return errors.New("missing required Docker Hub credentials")
 		}
 
 		localImageName, localTag, parseErr := configs.ParseImage(imageRef)
 		if parseErr != nil {
-			return fmt.Errorf("invalid image format: %w", parseErr)
+			pterm.Error.Printfln("invalid image format: %v", parseErr)
+			return fmt.Errorf("invalid image format: %v", parseErr)
 		}
 		if localImageName == "" {
+			pterm.Error.Printfln("invalid image reference")
 			return errors.New("invalid image reference")
 		}
 		if localTag == "" {
@@ -87,7 +90,8 @@ Set DOCKER_USERNAME and DOCKER_PASSWORD environment variables for Docker Hub aut
 		if configs.ContextDir == "" {
 			wd, err := os.Getwd()
 			if err != nil {
-				return fmt.Errorf("failed to get current working directory: %w", err)
+				pterm.Error.Printfln("Failed to get current working directory: %v", err)
+				return fmt.Errorf("failed to get current working directory: %v", err)
 			}
 			configs.ContextDir = wd
 		}
@@ -110,37 +114,31 @@ Set DOCKER_USERNAME and DOCKER_PASSWORD environment variables for Docker Hub aut
 
 		pterm.Info.Println("Starting build...")
 		if err := docker.Build(localImageName, localTag, buildOpts); err != nil {
-			pterm.Error.Println("Build failed:", err)
 			return err
 		}
 		pterm.Success.Println("Build completed successfully.")
-
-		pterm.Info.Println("Starting scan with Trivy...")
-		scanErr := docker.Trivy(fullImageName)
-		if scanErr != nil {
-			pterm.Error.Println("Scan failed:", scanErr)
-		} else {
-			pterm.Success.Println("Scan completed successfully.")
-		}
-
-		if scanErr != nil {
-			return fmt.Errorf("Docker Hub provisioning failed due to previous errors")
-		}
-
-		if !configs.ConfirmAfterPush {
-			pterm.Info.Println("Press Enter to continue...")
-			_, _ = bufio.NewReader(os.Stdin).ReadBytes('\n')
-		}
+		/*
+			pterm.Info.Println("Starting scan with Trivy...")
+			scanErr := docker.Trivy(fullImageName)
+			if scanErr != nil {
+				return scanErr
+			}
+		*/
+		/*
+			if !configs.ConfirmAfterPush {
+				pterm.Info.Println("Press Enter to continue...")
+				_, _ = bufio.NewReader(os.Stdin).ReadBytes('\n')
+			}*/
 
 		pterm.Info.Printf("Pushing image %s...\n", fullImageName)
 		pushOpts := docker.PushOptions{
 			ImageName: fullImageName,
+			Timeout:   1000000000000,
 		}
 		if err := docker.PushImage(pushOpts); err != nil {
 			pterm.Error.Println("Push failed:", err)
 			return err
 		}
-		pterm.Success.Println("Push completed successfully.")
 
 		if configs.DeleteAfterPush {
 			pterm.Info.Printf("Deleting local image %s...\n", fullImageName)

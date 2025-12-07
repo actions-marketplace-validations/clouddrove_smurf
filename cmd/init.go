@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/clouddrove/smurf/configs"
+	"github.com/pterm/pterm"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 )
@@ -16,40 +17,41 @@ var generateConfig = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		config := map[string]interface{}{
 			"sdkr": map[string]interface{}{
-				"docker_password":                "",
-				"docker_username":                "",
-				"provisionAcrRegistryName":       "",
-				"provisionAcrResourceGroup":      "",
-				"provisionAcrSubscriptionID":     "",
-				"provisionGcrProjectID":          "",
-				"google_application_credentials": "",
-				"imageName":                      "",
-				"targetImageTag":                 "",
+				"awsECR":         false,
+				"dockerHub":      false,
+				"ghcrRepo":       false,
+				"imageName":      "",
+				"targetImageTag": "",
+				"dockerfile":     "",
 			},
 			"selm": map[string]interface{}{
+				"deployHelm":  false,
 				"releaseName": "",
 				"namespace":   "",
 				"chartName":   "",
+				"fileName":    "",
 				"revision":    0,
 			},
 		}
 
 		file, err := os.Create(configs.FileName)
 		if err != nil {
+			pterm.Error.Printfln("error creating YAML file: %v", err)
 			return fmt.Errorf("error creating YAML file: %v", err)
 		}
 		defer file.Close()
 
 		data, err := yaml.Marshal(&config)
 		if err != nil {
+			pterm.Error.Printfln("error marshaling data to YAML: %v", err)
 			return fmt.Errorf("error marshaling data to YAML: %v", err)
 		}
 
 		if _, err := file.Write(data); err != nil {
+			pterm.Error.Printfln("error writing to YAML file: %v", err)
 			return fmt.Errorf("error writing to YAML file: %v", err)
 		}
-
-		fmt.Println("smurf.yaml configuration file generated successfully with empty values.")
+		fmt.Printf("✅smurf.yaml configuration file generated successfully with empty values.")
 		return nil
 	},
 }

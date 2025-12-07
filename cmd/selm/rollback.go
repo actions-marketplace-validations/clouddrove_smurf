@@ -8,7 +8,6 @@ import (
 
 	"github.com/clouddrove/smurf/configs"
 	"github.com/clouddrove/smurf/internal/helm"
-	"github.com/fatih/color"
 	"github.com/pterm/pterm"
 	"github.com/spf13/cobra"
 )
@@ -27,20 +26,25 @@ The first argument is the name of the release to roll back, and the second is th
       smurf helm rollback nginx 2 --namespace mynamespace --debug
       smurf helm rollback nginx 2 --force --timeout 600
       smurf helm rollback
+	  smurf selm rollback --history-max 5
       # In this example, it will read RELEASE and REVISION from the config file
     `,
+	SilenceUsage: true,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) != 0 && len(args) != 2 {
-			return fmt.Errorf("requires either exactly two arguments (RELEASE and REVISION) or none")
+			pterm.Error.Printfln("requires either exactly two arguments (RELEASE and REVISION) or none")
+			return errors.New("requires either exactly two arguments (RELEASE and REVISION) or none")
 		}
 
 		if len(args) == 2 {
 			revision, err := strconv.Atoi(args[1])
 			if err != nil {
+				pterm.Error.Printfln("invalid revision number '%s': %v", args[1], err)
 				return fmt.Errorf("invalid revision number '%s': %v", args[1], err)
 			}
 			if revision < 1 {
-				return fmt.Errorf("revision must be a positive integer")
+				pterm.Error.Printfln("revision must be a positive integer")
+				return errors.New("revision must be a positive integer")
 			}
 		}
 
@@ -56,7 +60,7 @@ The first argument is the name of the release to roll back, and the second is th
 		} else {
 			data, err := configs.LoadConfig(configs.FileName)
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
 			releaseName = data.Selm.ReleaseName
@@ -66,7 +70,8 @@ The first argument is the name of the release to roll back, and the second is th
 
 			revision = data.Selm.Revision
 			if revision < 1 {
-				return fmt.Errorf("revision must be a positive integer")
+				pterm.Error.Printfln("revision must be a positive integer")
+				return errors.New("revision must be a positive integer")
 			}
 
 			if configs.Namespace == "default" && data.Selm.Namespace != "" {
@@ -75,7 +80,8 @@ The first argument is the name of the release to roll back, and the second is th
 		}
 
 		if releaseName == "" || revision < 1 {
-			return errors.New(color.RedString("RELEASE and REVISION must be provided either as arguments or in the config"))
+			pterm.Error.Printfln("RELEASE and REVISION must be provided either as arguments or in the config")
+			return errors.New("RELEASE and REVISION must be provided either as arguments or in the config")
 		}
 
 		if configs.Namespace == "" {
@@ -90,11 +96,11 @@ The first argument is the name of the release to roll back, and the second is th
 			Wait:      configs.Wait,
 		}
 
-		err := helm.HelmRollback(releaseName, revision, rollbackOpts)
+		err := helm.HelmRollback(releaseName, revision, rollbackOpts, historyMax)
 		if err != nil {
-			return fmt.Errorf(color.RedString("Helm rollback failed: %v", err))
+			return err
 		}
-		pterm.Success.Println(fmt.Sprintf("Successfully rolled back release '%s' to revision '%d'", releaseName, revision))
+		pterm.Success.Printfln("Successfully rolled back release '%v' to revision '%v'", releaseName, revision)
 		return nil
 	},
 }
@@ -105,5 +111,6 @@ func init() {
 	rollbackCmd.Flags().BoolVar(&configs.Force, "force", false, "Force rollback even if there are conflicts")
 	rollbackCmd.Flags().IntVar(&configs.Timeout, "timeout", 300, "Timeout for the rollback operation in seconds")
 	rollbackCmd.Flags().BoolVar(&configs.Wait, "wait", true, "Wait until all resources are rolled back successfully")
+	rollbackCmd.Flags().IntVar(&historyMax, "history-max", 10, "Limit the maximum number of revisions saved per release")
 	selmCmd.AddCommand(rollbackCmd)
 }

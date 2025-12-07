@@ -2,7 +2,6 @@ package sdkr
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/clouddrove/smurf/configs"
 	"github.com/clouddrove/smurf/internal/docker"
@@ -14,9 +13,10 @@ import (
 // from the local system. If no image is provided, it reads from the config file.
 // On successful removal, a confirmation message is displayed.
 var removeCmd = &cobra.Command{
-	Use:   "remove [IMAGE_NAME[:TAG]]",
-	Short: "Remove a Docker image from the local system.",
-	Args:  cobra.MaximumNArgs(1),
+	Use:          "remove [IMAGE_NAME[:TAG]]",
+	Short:        "Remove a Docker image from the local system.",
+	Args:         cobra.MaximumNArgs(1),
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var imageRef string
 
@@ -25,19 +25,19 @@ var removeCmd = &cobra.Command{
 		} else {
 			data, err := configs.LoadConfig(configs.FileName)
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
 			if data.Sdkr.ImageName == "" {
+				pterm.Error.Printfln("image name (with optional tag) must be provided either as an argument or in the config")
 				return errors.New("image name (with optional tag) must be provided either as an argument or in the config")
 			}
 			imageRef = data.Sdkr.ImageName
 		}
 
-		pterm.Info.Printf("Removing Docker image %q...\n", imageRef)
+		pterm.Info.Printfln("Removing Docker image %v...\n", imageRef)
 		err := docker.RemoveImage(imageRef)
 		if err != nil {
-			pterm.Error.Println("Failed to remove Docker image:", err)
 			return err
 		}
 		pterm.Success.Println("Image removal completed successfully.")

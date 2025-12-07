@@ -1,13 +1,13 @@
 package selm
 
 import (
-	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/clouddrove/smurf/configs"
 	"github.com/clouddrove/smurf/internal/helm"
-	"github.com/fatih/color"
 	"github.com/pterm/pterm"
 	"github.com/spf13/cobra"
 )
@@ -15,13 +15,13 @@ import (
 var RepoURL string
 var Version string
 
-// installCmd is a subcommand that installs a Helm chart into a Kubernetes cluster.
 var installCmd = &cobra.Command{
-	Use:   "install [RELEASE] [CHART]",
-	Short: "Install a Helm chart into a Kubernetes cluster.",
-	Args:  cobra.MaximumNArgs(2),
+	Use:          "install [RELEASE] [CHART]",
+	Short:        "Install a Helm chart into a Kubernetes cluster.",
+	Args:         cobra.MaximumNArgs(2),
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		var releaseName, chartPath string
+		var releaseName, chartPath, namespace string
 		if len(args) >= 1 {
 			releaseName = args[0]
 		}
@@ -32,7 +32,7 @@ var installCmd = &cobra.Command{
 		if releaseName == "" || chartPath == "" {
 			data, err := configs.LoadConfig(configs.FileName)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to load config: %w", err)
 			}
 
 			if releaseName == "" {
@@ -46,7 +46,7 @@ var installCmd = &cobra.Command{
 			}
 
 			if releaseName == "" || chartPath == "" {
-				return errors.New(color.RedString("both RELEASE and CHART must be provided either as arguments or in the config"))
+				return fmt.Errorf("both RELEASE and CHART must be provided either as arguments or in the config")
 			}
 
 			if configs.Namespace == "" && data.Selm.Namespace != "" {
@@ -54,22 +54,46 @@ var installCmd = &cobra.Command{
 			}
 		}
 
-		if releaseName == "" || chartPath == "" {
-			return errors.New(color.RedString("RELEASE and CHART must be provided"))
-		}
-
 		timeoutDuration := time.Duration(configs.Timeout) * time.Second
 
-		if configs.Namespace == "" {
+		if namespace == "" {
 			configs.Namespace = "default"
 		}
 
-		pterm.Info.Println("Starting Helm install...")
-		err := helm.HelmInstall(releaseName, chartPath, configs.Namespace, configs.File, timeoutDuration, configs.Atomic, configs.Debug, configs.Set, configs.SetLiteral, RepoURL, Version)
-		if err != nil {
-			return errors.New(color.RedString("Helm install failed: %v", err))
+		if configs.Debug {
+			pterm.EnableDebugMessages()
+			pterm.Debug.Printfln("Starting Helm install with configuration:")
+			pterm.Debug.Printfln("  Release: %s", releaseName)
+			pterm.Debug.Printfln("  Chart: %s", chartPath)
+			pterm.Debug.Printfln("  Namespace: %s", configs.Namespace)
+			pterm.Debug.Printfln("  Timeout: %v", timeoutDuration)
+			pterm.Debug.Printfln("  Values files: %v", configs.File)
+			pterm.Debug.Printfln("  Set values: %v", configs.Set)
+			pterm.Debug.Printfln("  Set literal values: %v", configs.SetLiteral)
+			pterm.Debug.Printfln("  Repo URL: %s", RepoURL)
+			pterm.Debug.Printfln("  Version: %s", Version)
+			pterm.Debug.Printfln("  Wait: %v", configs.Wait)
 		}
-		pterm.Success.Println("Helm chart installed successfully.")
+
+		pterm.Println(fmt.Sprintf("🚀 Installing release '%s' in namespace '%s'\n", releaseName, configs.Namespace))
+
+		err := helm.HelmInstall(
+			releaseName,
+			chartPath,
+			configs.Namespace,
+			configs.File,
+			timeoutDuration,
+			configs.Atomic,
+			configs.Debug,
+			configs.Set,
+			configs.SetLiteral,
+			RepoURL,
+			Version,
+			configs.Wait,
+		)
+		if err != nil {
+			os.Exit(1)
+		}
 		return nil
 	},
 	Example: `
@@ -81,6 +105,7 @@ var installCmd = &cobra.Command{
   smurf selm install prometheus prometheus-community/prometheus
   smurf selm install my-release ./mychart --set key1=val1 --set key2=val2
   smurf selm install my-release ./mychart --set-literal myPassword='MySecurePass!'
+  smurf selm install --wait  # Wait for resources to be ready
   smurf selm install
   # In the last example, it will read RELEASE and CHART from the config file
   `,
@@ -92,9 +117,10 @@ func init() {
 	installCmd.Flags().StringArrayVarP(&configs.File, "values", "f", []string{}, "Specify values in a YAML file")
 	installCmd.Flags().BoolVar(&configs.Atomic, "atomic", false, "If set, installation process purges chart on fail")
 	installCmd.Flags().BoolVar(&configs.Debug, "debug", false, "Enable verbose output")
-	installCmd.Flags().StringSliceVar(&configs.Set, "set", []string{}, "Set values on the command line (can specify multiple or separate values with commas: key1=val1,key2=val2)")
-	installCmd.Flags().StringSliceVar(&configs.SetLiteral, "set-literal", []string{}, "Set literal values on the command line (values are always treated as strings)")
+	installCmd.Flags().StringSliceVar(&configs.Set, "set", []string{}, "Set values on the command line")
+	installCmd.Flags().StringSliceVar(&configs.SetLiteral, "set-literal", []string{}, "Set literal values on the command line")
 	installCmd.Flags().StringVar(&RepoURL, "repo", "", "Specify the chart repository URL for remote charts")
 	installCmd.Flags().StringVar(&Version, "version", "", "Specify the chart version to install")
+	installCmd.Flags().BoolVar(&configs.Wait, "wait", true, "Wait for all resources to be ready before marking the release as successful") // Default to true
 	selmCmd.AddCommand(installCmd)
 }

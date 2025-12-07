@@ -21,9 +21,10 @@ import (
 // as well as advanced features like specifying build args, timeouts, and
 // removing the local image once it's successfully pushed.
 var provisionAcrCmd = &cobra.Command{
-	Use:   "provision-acr [IMAGE_NAME[:TAG]]",
-	Short: "Build and push a Docker image to Azure Container Registry.",
-	Args:  cobra.MaximumNArgs(1),
+	Use:          "provision-acr [IMAGE_NAME[:TAG]]",
+	Short:        "Build and push a Docker image to Azure Container Registry.",
+	Args:         cobra.MaximumNArgs(1),
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var imageRef string
 		if len(args) == 1 {
@@ -34,6 +35,7 @@ var provisionAcrCmd = &cobra.Command{
 				return err
 			}
 			if data.Sdkr.ImageName == "" {
+				pterm.Error.Printfln("image name (with optional tag) must be provided either as an argument or in the config")
 				return errors.New("image name (with optional tag) must be provided either as an argument or in the config")
 			}
 			imageRef = data.Sdkr.ImageName
@@ -51,7 +53,7 @@ var provisionAcrCmd = &cobra.Command{
 
 		if configs.SubscriptionID == "" || configs.ResourceGroup == "" || configs.RegistryName == "" {
 			pterm.Error.Println("Azure subscription ID, resource group name, and registry name are required")
-			return errors.New("missing required Azure ACR parameters")
+			return errors.New("azure subscription ID, resource group name, and registry name are required")
 		}
 
 		fullAcrImage := fmt.Sprintf("%s.azurecr.io/%s", configs.RegistryName, imageRef)
@@ -67,6 +69,7 @@ var provisionAcrCmd = &cobra.Command{
 		if configs.ContextDir == "" {
 			wd, err := os.Getwd()
 			if err != nil {
+				pterm.Error.Printfln("failed to get current working directory: %v", err)
 				return fmt.Errorf("failed to get current working directory: %w", err)
 			}
 			configs.ContextDir = wd
@@ -100,7 +103,6 @@ var provisionAcrCmd = &cobra.Command{
 		}
 
 		if err := docker.Build(localImageName, localTag, buildOpts); err != nil {
-			pterm.Error.Println("Build failed:", err)
 			return err
 		}
 		pterm.Success.Println("Build completed successfully.")
@@ -132,7 +134,7 @@ var provisionAcrCmd = &cobra.Command{
 			pterm.Info.Printf("Deleting local image %s...\n", fullAcrImage)
 			if err := docker.RemoveImage(fullAcrImage); err != nil {
 				pterm.Error.Println("Failed to delete local image:", err)
-				return err
+				return fmt.Errorf("failed to delete local image: %v", err)
 			}
 			pterm.Success.Println("Successfully deleted local image:", fullAcrImage)
 		}

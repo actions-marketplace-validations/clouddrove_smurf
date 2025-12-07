@@ -11,22 +11,27 @@ var repoAddCmd = &cobra.Command{
 	Short: "Add a chart repository",
 	Long: `Add a chart repository to your local repository list.
 The repository can be accessed by its name in other commands.`,
-	Args: cobra.ExactArgs(2),
+	Args:         cobra.ExactArgs(2),
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		var username, password, certFile, keyFile, caFile string
+		var username, password, certFile, keyFile, caFile, helmConfigDir string
 		username = configs.Username
 		password = configs.Password
 		certFile = configs.CertFile
 		keyFile = configs.KeyFile
 		caFile = configs.CaFile
-		return helm.Repo_Add(args, username, password, certFile, keyFile, caFile)
+		helmConfigDir = configs.HelmConfigDir
+		return helm.Repo_Add(args, username, password, certFile, keyFile, caFile, helmConfigDir)
 	},
 	Example: `
   # Add a chart repository
   smurf selm repo add prometheus https://prometheus-community.github.io/helm-charts
 
   # Add a private chart repository with auth
-  smurf selm repo add myrepo https://charts.example.com --username myuser --password mypass`,
+  smurf selm repo add myrepo https://charts.example.com --username myuser --password mypass
+  
+  # Add a repository with custom Helm config directory
+  smurf selm repo add myrepo https://charts.example.com --helm-config /custom/path`,
 }
 
 func init() {
@@ -36,6 +41,7 @@ func init() {
 	repoAddCmd.Flags().StringVar(&configs.CertFile, "cert-file", "", "Identify HTTPS client using this SSL certificate file")
 	repoAddCmd.Flags().StringVar(&configs.KeyFile, "key-file", "", "Identify HTTPS client using this SSL key file")
 	repoAddCmd.Flags().StringVar(&configs.CaFile, "ca-file", "", "Verify certificates of HTTPS-enabled servers using this CA bundle")
+	repoAddCmd.Flags().StringVar(&configs.HelmConfigDir, "helm-config", "", "Helm configuration directory (default: $HELM_HOME or ~/.config/helm)")
 
 	// Add commands to root
 	repoCmd.AddCommand(repoAddCmd)
