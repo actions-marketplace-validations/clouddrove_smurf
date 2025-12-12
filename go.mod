@@ -12,13 +12,13 @@ require (
 	github.com/pterm/pterm v0.12.82
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/oauth2 v0.33.0
+	golang.org/x/oauth2 v0.34.0
 	gopkg.in/yaml.v2 v2.4.0
 	gopkg.in/yaml.v3 v3.0.1
-	helm.sh/helm/v3 v3.19.2
-	k8s.io/api v0.34.2
-	k8s.io/apimachinery v0.34.2
-	k8s.io/client-go v0.34.2
+	helm.sh/helm/v3 v3.19.3
+	k8s.io/api v0.34.3
+	k8s.io/apimachinery v0.34.3
+	k8s.io/client-go v0.34.3
 )
 
 require (
@@ -122,6 +122,7 @@ require (
 	github.com/rubenv/sql-migrate v1.8.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
+	github.com/sashabaranov/go-openai v1.41.2 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/spf13/cast v1.7.0 // indirect
