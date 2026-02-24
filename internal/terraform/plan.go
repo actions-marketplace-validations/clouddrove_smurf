@@ -39,7 +39,7 @@ func Plan(vars []string, varFiles []string,
 
 	planOptions := []tfexec.PlanOption{}
 
-	// Handle state file - add this block
+	// Handle state file
 	if state != "" {
 		Info("Using custom state file: %s", state)
 		planOptions = append(planOptions, tfexec.State(state))
@@ -88,13 +88,25 @@ func Plan(vars []string, varFiles []string,
 		planOptions = append(planOptions, tfexec.Refresh(false))
 	}
 
-	// Execute Terraform plan
-	_, err = tf.Plan(context.Background(), planOptions...)
+	// Execute Terraform plan and get the hasChanges boolean
+	hasChanges, err := tf.Plan(context.Background(), planOptions...)
+
 	if err != nil {
 		ai.AIExplainError(useAI, err.Error())
 		return err
 	}
 
+	// Check if there are any changes
+	if !hasChanges {
+		Success("\nNo changes. Your infrastructure matches the configuration.")
+
+		if out != "" {
+			Info("Note: Plan file was saved even though no changes detected: %s", out)
+		}
+		return nil
+	}
+
+	// Changes detected
 	if out != "" {
 		Success("Terraform plan saved to: %s", out)
 		Info("To apply this plan, run: smurf stf apply %s", out)
