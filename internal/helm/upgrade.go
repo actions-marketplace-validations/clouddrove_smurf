@@ -3,7 +3,6 @@ package helm
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -144,18 +143,25 @@ func HelmUpgrade(
 	fmt.Printf("🚀 Starting upgrade for release '%s'...\n", releaseName)
 	upgradeStartTime := time.Now()
 
+	podMonitor, monitorErr := newUpgradePodMonitor(namespace, releaseName, debug)
+	if monitorErr != nil {
+		if debug {
+			pterm.Warning.Printf("Could not start upgrade pod monitor: %v\n", monitorErr)
+		}
+	} else {
+		podMonitor.start()
+		defer podMonitor.stop()
+	}
+
 	// Run the upgrade
 	rel, err := client.Run(releaseName, chart, vals)
 	if err != nil {
-		errorMsg := err.Error()
-		if atomic && strings.Contains(errorMsg, "rolled back") {
-			fmt.Printf("\n⚠️  Upgrade failed and rollback may have issues\n")
-
-			// Check if rollback actually happened
-			handleInstallationSuccess(rel, namespace)
-			printFinalPodStatus(namespace, releaseName, debug)
+		if podMonitor != nil {
+			printUpgradeFailureDiagnostics(namespace, releaseName, podMonitor, atomic, err, debug)
+		} else {
+			describeFailedResources(namespace, releaseName)
+			printReleaseResources(namespace, releaseName)
 		}
-		//printReleaseResources(namespace, releaseName)
 		printErrorSummary("Helm upgradation", releaseName, namespace, chartRef, err)
 		ai.AIExplainError(useAI, err.Error())
 		return fmt.Errorf("upgrade failed: %w", err)
@@ -176,6 +182,12 @@ func HelmUpgrade(
 	handleInstallationSuccess(rel, namespace)
 
 	if err := printFinalPodStatus(namespace, releaseName, debug); err != nil {
+		if podMonitor != nil {
+			printUpgradeFailureDiagnostics(namespace, releaseName, podMonitor, atomic, err, debug)
+		} else {
+			describeFailedResources(namespace, releaseName)
+			printReleaseResources(namespace, releaseName)
+		}
 		printErrorSummary("Pod not healthy", releaseName, namespace, chartRef, err)
 		ai.AIExplainError(useAI, err.Error())
 		return fmt.Errorf("upgrade failed: %w", err)
@@ -478,6 +490,7 @@ func verifyFinalReadiness(namespace, releaseName string, timeout time.Duration, 
 			if debug {
 				pterm.Printf("Error checking workloads: %v\n", err)
 			}
+			time.Sleep(pollInterval)
 			continue // Retry on API errors
 		}
 
@@ -507,10 +520,20 @@ func verifyFinalReadiness(namespace, releaseName string, timeout time.Duration, 
 			continue
 		}
 
-		allReady, notReadyPods := checkPodReadiness(pods, debug)
-		if allReady {
+		_, notReadyPods := checkPodReadiness(pods, debug)
+
+		// Check if all pods are either ready OR succeeded
+		allGood := true
+		for _, pod := range pods {
+			if pod.Status.Phase != corev1.PodSucceeded && !isPodReady(pod) {
+				allGood = false
+				break
+			}
+		}
+
+		if allGood {
 			if debug {
-				pterm.Println("All pods and workloads are ready")
+				pterm.Println("All pods are either ready or successfully completed")
 			}
 			return nil
 		}
@@ -519,7 +542,7 @@ func verifyFinalReadiness(namespace, releaseName string, timeout time.Duration, 
 			pterm.Printf("Pods not ready: %v\n", notReadyPods)
 			// Print pod details for debugging
 			for _, pod := range pods {
-				if !isPodReady(pod) {
+				if pod.Status.Phase != corev1.PodSucceeded && !isPodReady(pod) {
 					printPodDetails(pod)
 				}
 			}
@@ -528,7 +551,6 @@ func verifyFinalReadiness(namespace, releaseName string, timeout time.Duration, 
 		time.Sleep(pollInterval)
 	}
 }
-
 func checkWorkloadReadiness(clientset *kubernetes.Clientset, namespace, releaseName string, debug bool) (bool, string, error) {
 	labelSelector := fmt.Sprintf(appKubernets, releaseName)
 
@@ -588,9 +610,20 @@ func checkPodReadiness(pods []corev1.Pod, debug bool) (bool, []string) {
 	allReady := true
 
 	for _, pod := range pods {
+		// Check if pod is in a terminal success state
+		if pod.Status.Phase == corev1.PodSucceeded {
+			// Succeeded is a valid terminal state for Jobs
+			// We consider it as "ready" for the purpose of this check
+			if debug {
+				pterm.Printf("Pod %s has Succeeded (completed successfully)\n", pod.Name)
+			}
+			continue
+		}
+
 		if !isPodReady(pod) {
 			allReady = false
 			status := fmt.Sprintf("Pod/%s: %s", pod.Name, pod.Status.Phase)
+
 			if pod.Status.Phase == corev1.PodRunning {
 				// If running but not ready, check container statuses
 				for _, cs := range pod.Status.ContainerStatuses {
@@ -608,6 +641,14 @@ func checkPodReadiness(pods []corev1.Pod, debug bool) (bool, []string) {
 }
 
 func isPodReady(pod corev1.Pod) bool {
+	// Pod is considered ready if:
+	// 1. It's Running and has Ready condition true
+	// 2. It's Succeeded (for Jobs and similar workloads)
+
+	if pod.Status.Phase == corev1.PodSucceeded {
+		return true
+	}
+
 	if pod.Status.Phase != corev1.PodRunning {
 		return false
 	}
@@ -922,29 +963,6 @@ func isPodFromRelease(pod corev1.Pod, releaseName string) bool {
 	return false
 }
 
-// Helper function to get pod logs
-func getPodLogs(clientset *kubernetes.Clientset, namespace, podName, containerName string, tailLines int64) (string, error) {
-	podLogOpts := corev1.PodLogOptions{
-		Container: containerName,
-		TailLines: &tailLines,
-	}
-
-	req := clientset.CoreV1().Pods(namespace).GetLogs(podName, &podLogOpts)
-	podLogs, err := req.Stream(context.Background())
-	if err != nil {
-		return "", err
-	}
-	defer podLogs.Close()
-
-	buf := new(strings.Builder)
-	_, err = io.Copy(buf, podLogs)
-	if err != nil {
-		return "", err
-	}
-
-	return buf.String(), nil
-}
-
 // Print status summary
 func printStatusSummary(statusCount map[string]int, total int) {
 	fmt.Printf("📈 Status: ")
@@ -1170,24 +1188,6 @@ func describePod(clientset *kubernetes.Clientset, pod corev1.Pod, namespace stri
 		}
 	}
 
-	// Show logs for failed/error containers
-	if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodPending {
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.State.Waiting != nil || (cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0) {
-				fmt.Printf("\n📝 Attempting to get logs for container '%s':\n", cs.Name)
-				logs, err := getPodLogs(clientset, namespace, pod.Name, cs.Name, 20) // last 20 lines
-				if err != nil {
-					fmt.Printf("  ❌ Failed : %v\n", err)
-				} else if logs != "" {
-					fmt.Println("  Last 20 lines of logs:")
-					fmt.Println(strings.Repeat("-", 40))
-					fmt.Println(logs)
-					fmt.Println(strings.Repeat("-", 40))
-				}
-			}
-		}
-	}
-
 	fmt.Println(strings.Repeat("=", 50))
 }
 
@@ -1321,6 +1321,7 @@ func showPodState(title string, pods []corev1.Pod, releaseName string, debug boo
 }
 
 // printFinalPodStatus checks the actual current pod status after upgrade
+// printFinalPodStatus checks the actual current pod status after upgrade
 func printFinalPodStatus(namespace, releaseName string, debug bool) error {
 	clientset, err := getKubeClient()
 	if err != nil {
@@ -1348,11 +1349,12 @@ func printFinalPodStatus(namespace, releaseName string, debug bool) error {
 		{"POD NAME", "STATUS", "READY", "RESTARTS", "AGE", "NODE", "CONDITIONS"},
 	}
 
-	var status string
-	var podName string
+	var failedPods []string
+	var pendingPods []string
+	var successfulPods []string
+	var runningPods []string
 
 	for _, pod := range podList.Items {
-		podName = pod.Name
 		age := time.Since(pod.CreationTimestamp.Time).Round(time.Second)
 
 		// Count ready containers
@@ -1365,7 +1367,7 @@ func printFinalPodStatus(namespace, releaseName string, debug bool) error {
 		}
 
 		// Determine pod status (like kubectl)
-		status = getKubectlLikeStatus(pod)
+		status := getKubectlLikeStatus(pod)
 
 		// Get node name
 		nodeName := pod.Spec.NodeName
@@ -1394,18 +1396,72 @@ func printFinalPodStatus(namespace, releaseName string, debug bool) error {
 			nodeName,
 			conditionStr,
 		})
+
+		// Categorize pods for summary
+		switch {
+		case strings.Contains(status, "Failed") || strings.Contains(status, "Error") || strings.Contains(status, "CrashLoopBackOff"):
+			failedPods = append(failedPods, fmt.Sprintf("%s (%s)", pod.Name, status))
+		case strings.Contains(status, "Pending") || strings.Contains(status, "ImagePullBackOff") || strings.Contains(status, "ErrImagePull"):
+			pendingPods = append(pendingPods, fmt.Sprintf("%s (%s)", pod.Name, status))
+		case strings.Contains(status, "Completed") || strings.Contains(status, "Succeeded"):
+			successfulPods = append(successfulPods, fmt.Sprintf("%s (%s)", pod.Name, status))
+		case strings.Contains(status, "Running"):
+			runningPods = append(runningPods, fmt.Sprintf("%s (%s)", pod.Name, status))
+		}
 	}
 
 	pterm.DefaultTable.WithHasHeader().WithData(tableData).Render()
 
-	// Also show a quick summary
-	if status != "Running" {
-		return fmt.Errorf("The pod %s is not running. Current status with reason: %s", podName, status)
+	// Print summary with colors
+	fmt.Println("\n📋 Pod Status Summary:")
+	if len(runningPods) > 0 {
+		pterm.Success.Printf("  ✅ Running: %d pods\n", len(runningPods))
+	}
+	if len(successfulPods) > 0 {
+		pterm.Success.Printf("  ✅ Completed/Succeeded: %d pods\n", len(successfulPods))
+	}
+	if len(pendingPods) > 0 {
+		pterm.Warning.Printf("  ⏳ Pending: %d pods\n", len(pendingPods))
+		for _, pod := range pendingPods {
+			pterm.Warning.Printf("     - %s\n", pod)
+		}
+	}
+	if len(failedPods) > 0 {
+		pterm.Error.Printf("  ❌ Failed: %d pods\n", len(failedPods))
+		for _, pod := range failedPods {
+			pterm.Error.Printf("     - %s\n", pod)
+		}
+	}
+
+	// Only return error if there are failed pods (not just "not running")
+	// For Jobs, Succeeded is a valid final state
+	if len(failedPods) > 0 {
+		return fmt.Errorf("found %d failed pods in release %s", len(failedPods), releaseName)
+	}
+
+	// If there are pending pods, return a warning but don't fail the overall operation
+	if len(pendingPods) > 0 && len(failedPods) == 0 {
+		fmt.Printf("\n⚠️  %d pods are still pending. This might be expected for some workloads.\n", len(pendingPods))
+		// Don't return error for pending pods as they might resolve
+		return nil
+	}
+
+	// Success case: all pods are either running, succeeded, or completed
+	if len(runningPods) > 0 || len(successfulPods) > 0 {
+		fmt.Printf("\n✅ All pods are in a healthy state (%d running, %d completed)\n",
+			len(runningPods), len(successfulPods))
+		return nil
+	}
+
+	// If we get here, we have an unexpected state
+	if len(podList.Items) == len(pendingPods) && len(pendingPods) > 0 {
+		return fmt.Errorf("all pods are pending for release %s", releaseName)
 	}
 
 	return nil
 }
 
+// getKubectlLikeStatus returns status similar to kubectl get pods
 // getKubectlLikeStatus returns status similar to kubectl get pods
 func getKubectlLikeStatus(pod corev1.Pod) string {
 	// This mimics kubectl's logic for the STATUS column
@@ -1421,6 +1477,12 @@ func getKubectlLikeStatus(pod corev1.Pod) string {
 		// Check for specific reasons in pending
 		for _, cs := range pod.Status.ContainerStatuses {
 			if cs.State.Waiting != nil {
+				// Special cases that indicate failure
+				if cs.State.Waiting.Reason == "ImagePullBackOff" ||
+					cs.State.Waiting.Reason == "ErrImagePull" ||
+					cs.State.Waiting.Reason == "CrashLoopBackOff" {
+					return cs.State.Waiting.Reason
+				}
 				return fmt.Sprintf("Pending:%s", cs.State.Waiting.Reason)
 			}
 		}
@@ -1454,7 +1516,8 @@ func getKubectlLikeStatus(pod corev1.Pod) string {
 		return "Running"
 
 	case corev1.PodSucceeded:
-		return "Completed"
+		// This is a SUCCESS state for Jobs and similar workloads
+		return "Succeeded"
 
 	case corev1.PodFailed:
 		// Get termination reason

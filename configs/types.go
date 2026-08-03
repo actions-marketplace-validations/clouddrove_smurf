@@ -12,7 +12,6 @@ var (
 	SubscriptionID   string
 	ResourceGroup    string
 	RegistryName     string
-	SarifFile        string
 	ConfirmAfterPush bool
 	DeleteAfterPush  bool
 	ProjectID        string
@@ -26,7 +25,7 @@ var (
 	Directory       string
 	File            []string
 	Namespace       string
-	Timeout         int
+	Timeout         int // in seconds
 	Atomic          bool
 	Debug           bool
 	Set             []string
@@ -93,4 +92,18 @@ type SelmConfig struct {
 	ChartName   string `yaml:"chartName"`
 	FileName    string `yaml:"fileName"`
 	Revision    int    `yaml:"revision"`
+}
+
+// InitOptions represents all options for Terraform init
+type InitOptions struct {
+	Dir           string
+	Upgrade       bool
+	UseAI         bool
+	Reconfigure   bool
+	MigrateState  bool
+	BackendConfig []string
+	Backend       bool
+	ForceCopy     bool
+	Get           bool
+	FromModule    string
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/clouddrove/smurf/configs"
 	"github.com/clouddrove/smurf/internal/docker"
+	"github.com/distribution/reference"
 	"github.com/pterm/pterm"
 	"github.com/spf13/cobra"
 )
@@ -54,7 +55,7 @@ Example: ghcr.io/my-org/my-app:latest`,
 func init() {
 	provisionGHCRCmd.Flags().StringVarP(&configs.DockerfilePath, "file", "f", "", "Path to Dockerfile (default: Dockerfile)")
 	provisionGHCRCmd.Flags().BoolVar(&configs.NoCache, "no-cache", false, "Disable build cache")
-	provisionGHCRCmd.Flags().StringArrayVar(&configs.BuildArgs, "build-arg", []string{}, "Build-time variables (e.g. --build-arg key=value)")
+	provisionGHCRCmd.Flags().StringArrayVar(&configs.BuildArgs, "build-arg", []string{}, "Set build-time variables (key=value). Repeat the flag or pass comma-separated pairs")
 	provisionGHCRCmd.Flags().StringVar(&configs.Target, "target", "", "Target build stage")
 	provisionGHCRCmd.Flags().StringVar(&configs.Platform, "platform", "", "Platform (e.g. linux/amd64)")
 	provisionGHCRCmd.Flags().IntVar(&configs.BuildTimeout, "timeout", 1500, "Build timeout in seconds")
@@ -67,20 +68,20 @@ func init() {
 
 func runProvisionGHCR(cmd *cobra.Command, args []string) error {
 	var imageRef string
+	var cfg *configs.Config
+
 	if len(args) == 1 {
 		imageRef = args[0]
 	} else {
-		cfg, err := configs.LoadConfig(configs.FileName)
+		loaded, err := configs.LoadConfig(configs.FileName)
 		if err != nil {
 			return err
 		}
-		if cfg.Sdkr.ImageName == "" {
+		if loaded.Sdkr.ImageName == "" {
 			return errors.New("image name (with optional tag) must be provided either as an argument or in the config")
 		}
-		imageRef = resolveImageRef(args, cfg)
-		if err := ensureGHCRAuth(cfg.Sdkr.GithubUsername, cfg.Sdkr.GithubToken); err != nil {
-			return err
-		}
+		cfg = loaded
+		imageRef = cfg.Sdkr.ImageName
 	}
 
 	if imageRef == "" {
@@ -91,14 +92,31 @@ func runProvisionGHCR(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Load config-based credentials regardless of whether the image was passed
+	// as an argument, so smurf.yaml creds work in both cases. Already-set
+	// environment variables always win.
+	if os.Getenv("GITHUB_USERNAME") == "" || os.Getenv("GITHUB_TOKEN") == "" {
+		if cfg == nil {
+			loaded, err := configs.LoadConfig(configs.FileName)
+			if err != nil {
+				return err
+			}
+			cfg = loaded
+		}
+		if err := exportGHCRCreds(cfg.Sdkr.GithubUsername, cfg.Sdkr.GithubToken); err != nil {
+			return err
+		}
+	}
+
 	username := os.Getenv("GITHUB_USERNAME")
 	token := os.Getenv("GITHUB_TOKEN")
 	if username == "" || token == "" {
+		pterm.Error.Println("GitHub Container Registry credentials missing.")
+		pterm.Info.Println("Set using environment variables:")
+		pterm.Info.Println("  export GITHUB_USERNAME=\"your-username\"")
+		pterm.Info.Println("  export GITHUB_TOKEN=\"your-github-personal-access-token\"")
+		pterm.Info.Println("Or define github_username and github_token in smurf.yaml.")
 		return errors.New("missing required GHCR credentials")
-	}
-
-	if err := ensureGHCRAuth(username, token); err != nil {
-		return err
 	}
 
 	imageName, tag, err := configs.ParseImage(imageRef)
@@ -122,6 +140,10 @@ func runProvisionGHCR(cmd *cobra.Command, args []string) error {
 	}
 	pterm.Success.Println("✅ Build completed successfully.")
 
+	if err := confirmPush(); err != nil {
+		return err
+	}
+
 	if err := pushToGHCR(fullImage); err != nil {
 		return err
 	}
@@ -134,53 +156,50 @@ func runProvisionGHCR(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func resolveImageRef(args []string, cfg *configs.Config) string {
-	if len(args) > 0 {
-		return args[0]
-	}
-	if cfg.Sdkr.ImageName != "" {
-		return cfg.Sdkr.ImageName
-	}
-	pterm.Error.Println("Image name must be provided either as argument or in config file.")
-	return ""
-}
-
 func validateGHCRImage(image string) error {
+	ghcrFormat := "ghcr.io/OWNER/IMAGE_NAME:TAG"
 	if !strings.HasPrefix(image, "ghcr.io/") {
-		pterm.Error.Printfln("Invalid GHCR image format: %s", image)
-		pterm.Info.Println("Expected format: ghcr.io/OWNER/IMAGE_NAME:TAG")
+		pterm.Error.Printfln("Invalid GHCR image format: %s\nExpected format: %s\n Missing Prefix : ghcr.io/", image, ghcrFormat)
 		return errors.New("invalid GHCR image format")
 	}
+	named, err := reference.ParseNormalizedNamed(image)
+	if err != nil {
+		pterm.Error.Printfln("Invalid GHCR image reference: %s\n Expected format: %s", image, ghcrFormat)
+		return fmt.Errorf("invalid GHCR image reference: %w", err)
+	}
+	// GHCR requires owner + repository: ghcr.io/<owner>/<repo>. named.Name()
+	// keeps the registry in the string, so a 2-slash minimum covers both
+	// ghcr.io/owner/repo and deeper paths like ghcr.io/org/team/app.
+	if strings.Count(named.Name(), "/") < 2 {
+		pterm.Error.Printfln("Invalid GHCR image reference: %s (missing owner)", image)
+		pterm.Info.Printf("Expected format: %s", ghcrFormat)
+		return errors.New("invalid GHCR image reference: missing owner")
+	}
 	return nil
 }
 
-func ensureGHCRAuth(username, token string) error {
-	if username == "" || token == "" {
-		envVars := map[string]string{
-			"GITHUB_USERNAME": os.Getenv("GITHUB_USERNAME"),
-			"GITHUB_TOKEN":    os.Getenv("GITHUB_TOKEN"),
-		}
-		if err := configs.ExportEnvironmentVariables(envVars); err != nil {
-			return err
-		}
-		username = envVars["GITHUB_USERNAME"]
-		token = envVars["GITHUB_TOKEN"]
+// exportGHCRCreds exports the config-provided GHCR credentials into the
+// environment for any variable that is not already set, so environment
+// variables always take precedence over smurf.yaml values.
+func exportGHCRCreds(configUsername, configToken string) error {
+	envVars := map[string]string{}
+	if os.Getenv("GITHUB_USERNAME") == "" && configUsername != "" {
+		envVars["GITHUB_USERNAME"] = configUsername
 	}
-
-	if username == "" || token == "" {
-		pterm.Error.Println("GitHub Container Registry credentials missing.")
-		pterm.Info.Println("Set using environment variables:")
-		pterm.Info.Println("  export GITHUB_USERNAME=\"your-username\"")
-		pterm.Info.Println("  export GITHUB_TOKEN=\"your-github-personal-access-token\"")
-		return errors.New("missing GHCR credentials")
+	if os.Getenv("GITHUB_TOKEN") == "" && configToken != "" {
+		envVars["GITHUB_TOKEN"] = configToken
 	}
-	return nil
+	if len(envVars) == 0 {
+		return nil
+	}
+	return configs.ExportEnvironmentVariables(envVars)
 }
 
 func prepareBuildOptions() (docker.BuildOptions, error) {
 	if configs.ContextDir == "" {
 		wd, err := os.Getwd()
 		if err != nil {
+			pterm.Error.Println("Failed to determine working directory.")
 			return docker.BuildOptions{}, fmt.Errorf("failed to get working directory: %v", err)
 		}
 		configs.ContextDir = wd
@@ -192,12 +211,9 @@ func prepareBuildOptions() (docker.BuildOptions, error) {
 		configs.DockerfilePath = filepath.Join(configs.ContextDir, configs.DockerfilePath)
 	}
 
-	buildArgsMap := make(map[string]string)
-	for _, arg := range configs.BuildArgs {
-		parts := strings.SplitN(arg, "=", 2)
-		if len(parts) == 2 {
-			buildArgsMap[parts[0]] = parts[1]
-		}
+	buildArgsMap, err := sdkrBuildArgs()
+	if err != nil {
+		return docker.BuildOptions{}, err
 	}
 
 	return docker.BuildOptions{

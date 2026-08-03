@@ -21,11 +21,11 @@ var rollbackCmd = &cobra.Command{
 	Short: "Roll back a release to a previous revision",
 	Long: `Roll back a release to a previous revision.
 The first argument is the name of the release to roll back, and the second is the revision number to roll back to.`,
-	Example: ` 
-      smurf helm rollback nginx 2
-      smurf helm rollback nginx 2 --namespace mynamespace --debug
-      smurf helm rollback nginx 2 --force --timeout 600
-      smurf helm rollback
+	Example: `
+      smurf selm rollback nginx 2
+      smurf selm rollback nginx 2 --namespace mynamespace --debug
+      smurf selm rollback nginx 2 --force --timeout 600
+      smurf selm rollback
 	  smurf selm rollback --history-max 5
       # In this example, it will read RELEASE and REVISION from the config file
     `,
@@ -113,5 +113,9 @@ func init() {
 	rollbackCmd.Flags().BoolVar(&configs.Wait, "wait", true, "Wait until all resources are rolled back successfully")
 	rollbackCmd.Flags().IntVar(&historyMax, "history-max", 10, "Limit the maximum number of revisions saved per release")
 	rollbackCmd.Flags().BoolVar(&useAI, "ai", false, "To enable AI help mode, export the OPENAI_API_KEY environment variable with your OpenAI API key.")
+
+	rollbackCmd.ValidArgsFunction = completeReleaseNames
+	_ = rollbackCmd.RegisterFlagCompletionFunc("namespace", completeNamespaces)
+
 	selmCmd.AddCommand(rollbackCmd)
 }

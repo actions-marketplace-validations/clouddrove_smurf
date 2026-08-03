@@ -3,7 +3,9 @@ package terraform
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/clouddrove/smurf/internal/ai"
 	"github.com/hashicorp/terraform-exec/tfexec"
@@ -17,12 +19,14 @@ func Plan(vars []string, varFiles []string,
 	dir string, destroy bool,
 	targets []string, refresh bool,
 	state string, out string,
-	useAI bool) error {
+	useAI bool) (bool, error) {
+
+	Step("Initializing Terraform client...")
 	tf, err := GetTerraform(dir)
 	if err != nil {
 		Error("Failed to initialize Terraform client: %v", err)
 		ai.AIExplainError(useAI, err.Error())
-		return err
+		return false, err
 	}
 
 	var outputBuffer bytes.Buffer
@@ -47,22 +51,43 @@ func Plan(vars []string, varFiles []string,
 
 	// Handle output plan file
 	if out != "" {
+		// Validate output path
+		outDir := filepath.Dir(out)
+		if outDir != "" && outDir != "." {
+			if _, err := os.Stat(outDir); os.IsNotExist(err) {
+				Error("Output directory does not exist: %s", outDir)
+				return false, fmt.Errorf("output directory does not exist: %s", outDir)
+			}
+		}
+
+		// Check if we can write to the file
+		if _, err := os.Stat(out); err == nil {
+			Warn("Plan file %s already exists and will be overwritten", out)
+		}
+
 		Info("Saving execution plan to: %s", out)
 		planOptions = append(planOptions, tfexec.Out(out))
 	}
 
 	// Apply variables
 	if len(vars) > 0 {
+		Info("Setting %d variable(s)...", len(vars))
 		for _, v := range vars {
-			Info("Applying variable: %s", v)
+			Info("Using variable: %s", v)
 			planOptions = append(planOptions, tfexec.Var(v))
 		}
 	}
 
-	// Apply variable files
+	// Apply variable files with validation
 	if len(varFiles) > 0 {
+		Info("Loading %d variable file(s)...", len(varFiles))
 		for _, vf := range varFiles {
-			Info("Loading variable file: %s", vf)
+			if _, err := os.Stat(vf); os.IsNotExist(err) {
+				Error("Variable file not found: %s", vf)
+				ai.AIExplainError(useAI, fmt.Sprintf("Variable file not found: %s", vf))
+				return false, fmt.Errorf("variable file not found: %s", vf)
+			}
+			Info("Using var-file: %s", vf)
 			planOptions = append(planOptions, tfexec.VarFile(vf))
 		}
 	}
@@ -89,31 +114,30 @@ func Plan(vars []string, varFiles []string,
 	}
 
 	// Execute Terraform plan and get the hasChanges boolean
+	Step("Generating Terraform plan...")
 	hasChanges, err := tf.Plan(context.Background(), planOptions...)
-
 	if err != nil {
 		ai.AIExplainError(useAI, err.Error())
-		return err
+		return false, err
 	}
 
-	// Check if there are any changes
-	if !hasChanges {
-		Success("\nNo changes. Your infrastructure matches the configuration.")
-
-		if out != "" {
-			Info("Note: Plan file was saved even though no changes detected: %s", out)
-		}
-		return nil
-	}
-
-	// Changes detected
+	// Add success message based on whether there are changes
 	if out != "" {
-		Success("Terraform plan saved to: %s", out)
-		Info("To apply this plan, run: smurf stf apply %s", out)
+		// Check if plan file was created and has content
+		if fileInfo, err := os.Stat(out); err == nil && fileInfo.Size() > 0 {
+			Success("Terraform plan saved to: %s", out)
+			Info("To apply this plan, run: smurf stf apply %s", out)
+		} else if !hasChanges {
+			Success("No changes; the infrastructure is up to date with the current configuration.")
+			// Clean up empty plan file
+			os.Remove(out)
+			Info(" Removed empty plan file: %s", out)
+		}
+	} else if !hasChanges {
+		Success("No changes; the infrastructure is up to date with the current configuration.")
 	} else {
 		Success("Terraform plan executed successfully. Review the changes above before applying.")
-		Warn("Note: No plan file was saved. To save and apply later, use: smurf stf plan --out=plan.tfplan")
 	}
 
-	return nil
+	return hasChanges, nil
 }

@@ -4,13 +4,60 @@ All notable and important changes to **Smurf Tool** are documented here.
 
 ---
 
+## [v1.1.2] - 2026-04-30
+### :bug: Bug Fixes
+- [`85efac3`](https://github.com/clouddrove/smurf/commit/85efac3d47f7ebe56353b560b70243d34a2ef9c6) - update go version 1.25.5 to 1.25.8 *(PR [#396](https://github.com/clouddrove/smurf/pull/396) by [@anket-cd](https://github.com/anket-cd))*
+- [`aad25c0`](https://github.com/clouddrove/smurf/commit/aad25c071c1bc7bc057a9f5de8693cbf0eed76c5) - replace ANSI escape sequences with pterm for safe, consistent show command output *(PR [#397](https://github.com/clouddrove/smurf/pull/397) by [@anket-cd](https://github.com/anket-cd))*
+
+
+## [v1.0.0] — 2026-01-20
+### Added
+- Add missing Smurf STF commands:
+   - `smurf stf state rm`
+   - `smurf stf state pull`
+   - `smurf stf state push`
+   - `smurf stf import`
+
+### Fixed
+- Update deploy command
+- Update `smurf selm install` command
+- Update kubernetes function for error handling
+
+---
+
+## [v0.1.3] — 2026-01-20
+### Added
+- Add Timeout Support to Terraform Format Command
+
+---
+
+## [v0.1.2] — 2026-01-20
+### Added
+- Added Multi-Threading Support to `smurf selm upgrade`
+
+### Fixed
+- Fix OCI Chart Loading in GitHub Actions
+
+---
+
+## [v0.1.0] — 2025-12-15
+### Added
+- Add smurf sdkr for google cloud platform(GCP)
+- Add history max flag for `smurf selm`
+
+### Fixed
+- update smurf terraform provision command
+- smurf stf plan `--out` flag update
+
+---
+
 ## [v0.0.9] — 2025-11-26
 ### Added
 - Add smurf sdkr for google cloud platform(GCP)
 - Add history max flag for smurf selm
 - Add GHCR repo feature
 - Add `smurf deploy` command
-- add smurf selm init command
+- Add smurf selm init command
 
 ### Fixed
 - Update `smurf stf format` command
@@ -98,3 +145,4 @@ All notable and important changes to **Smurf Tool** are documented here.
     - `smurf sdkr --help`
     - `smurf selm --help`
 
+[v1.1.2]: https://github.com/clouddrove/smurf/compare/v1.1.1...v1.1.2

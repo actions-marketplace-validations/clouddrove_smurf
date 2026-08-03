@@ -12,13 +12,17 @@ PROGRAM=$(BINDIR)/$(BASENAME)$(EXE)
 LAST_RELEASE=
 
 REPO=$(shell go list | head -n 1)
+APP_PACKAGE=$(REPO)/cmd
 IMAGE=$(BASENAME)
 VERSION ?= $(shell git describe --tags --always --dirty)
+COMMIT ?= $(shell git rev-parse --short HEAD)
+DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 DOCKER=docker
 PACKAGE=$(DIST)/$(basename $(notdir $(PROGRAM)))-$(shell go env GOOS)-$(shell go env GOARCH).zip
+LDFLAGS=-X '$(APP_PACKAGE).version=$(VERSION)' -X '$(APP_PACKAGE).commit=$(COMMIT)' -X '$(APP_PACKAGE).date=$(DATE)'
 
 
-.PHONY: $(PROGRAM)
+.PHONY: $(PROGRAM) all compile install image test test-integration vet release-snapshot docs man
 
 all: $(PROGRAM)
 
@@ -26,7 +30,7 @@ compile: $(PROGRAM)
 
 $(PROGRAM): $(BINDIR)
 	mkdir -p $(dir $@)
-	go build -ldflags="-X '$(REPO)/program.Version=${VERSION}'" -o $(PROGRAM)
+	go build -ldflags="$(LDFLAGS)" -o $(PROGRAM)
 
 package: $(PACKAGE)
 
@@ -42,16 +46,39 @@ $(PACKAGE): $(PROGRAM)
 	tar -czf $@ -C $(dir $<) $(notdir $<)
 
 install:
-	go install -ldflags="-X '$(REPO)/program.Version=${VERSION}'"
+	go install -ldflags="$(LDFLAGS)"
 
 image:
-	$(DOCKER) build -f Dockerfile --build-arg PROGRAM=$(BASENAME) --build-arg VERSION=$(VERSION) --build-arg BASENAME=$(BASENAME) -t $(IMAGE) .
+	$(DOCKER) build -f Dockerfile --build-arg PROGRAM=$(BASENAME) --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) --build-arg BASENAME=$(BASENAME) -t $(IMAGE) .
 
 test:
-	go test -v ./...
+	go test ./...
+
+test-integration:
+	go test -tags=integration -v ./test/...
 
 vet:
 	go vet ./...
+
+# Regenerate the CLI reference under docs/sm/docs/cli from the live command
+# tree, so it can never drift from the code. Depends on compile (not
+# $(PROGRAM)) so this always rebuilds the binary before generating docs.
+docs: compile
+	rm -f docs/sm/docs/cli/*.md
+	./$(PROGRAM) docs --dir docs/sm/docs/cli --format markdown
+
+# Generate man pages into dist/man (dist/ is gitignored, these are build
+# artifacts, not committed).
+man: compile
+	mkdir -p $(DIST)/man
+	./$(PROGRAM) docs --dir $(DIST)/man --format man
+
+# Build every release target locally without publishing anything, using the
+# same .goreleaser.yml the release workflow runs on tag push. Requires
+# goreleaser (https://goreleaser.com/install/) on PATH.
+release-snapshot:
+	@command -v goreleaser >/dev/null 2>&1 || { echo "goreleaser not found on PATH; install it: https://goreleaser.com/install/"; exit 1; }
+	goreleaser release --snapshot --clean --skip=publish
 
 changelog: CHANGELOG.md
 CHANGELOG.md: .chglog/config.yml
@@ -65,7 +92,6 @@ hooks: .git/hooks/pre-commit
 .git/hooks/pre-commit: .pre-commit-config.yaml
 	pre-commit install
 	pre-commit install --hook-type commit-msg
-
 
 info::
 	@echo BASENAME=$(BASENAME)

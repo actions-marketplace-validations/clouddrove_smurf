@@ -1,12 +1,10 @@
 package sdkr
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/clouddrove/smurf/configs"
@@ -58,12 +56,9 @@ var provisionAcrCmd = &cobra.Command{
 
 		fullAcrImage := fmt.Sprintf("%s.azurecr.io/%s", configs.RegistryName, imageRef)
 
-		buildArgsMap := make(map[string]string)
-		for _, arg := range configs.BuildArgs {
-			parts := strings.SplitN(arg, "=", 2)
-			if len(parts) == 2 {
-				buildArgsMap[parts[0]] = parts[1]
-			}
+		buildArgsMap, err := sdkrBuildArgs()
+		if err != nil {
+			return err
 		}
 
 		if configs.ContextDir == "" {
@@ -92,14 +87,10 @@ var provisionAcrCmd = &cobra.Command{
 		}
 
 		pterm.Info.Println("Starting ACR build...")
-		localImageName, localTag, parseErr := configs.ParseImage(imageRef)
+		localImage, localImageName, localTag, parseErr := configs.NormalizeAcrLocalImage(imageRef)
 		if parseErr != nil {
 			pterm.Error.Println("Image Parse Err:", parseErr)
 			return parseErr
-		}
-
-		if localTag == "" {
-			localTag = "latest"
 		}
 
 		if err := docker.Build(localImageName, localTag, buildOpts, useAI); err != nil {
@@ -112,10 +103,8 @@ var provisionAcrCmd = &cobra.Command{
 			pushImage = fullAcrImage
 		}
 
-		if !configs.ConfirmAfterPush {
-			pterm.Info.Println("Press Enter to continue...")
-			buf := bufio.NewReader(os.Stdin)
-			_, _ = buf.ReadBytes('\n')
+		if err := confirmPush(); err != nil {
+			return err
 		}
 
 		pterm.Info.Printf("Pushing image %s to ACR...\n", pushImage)
@@ -123,7 +112,7 @@ var provisionAcrCmd = &cobra.Command{
 			configs.SubscriptionID,
 			configs.ResourceGroup,
 			configs.RegistryName,
-			localImageName,
+			localImage,
 			useAI,
 		); err != nil {
 			pterm.Error.Println("Push to ACR failed:", err)
@@ -132,12 +121,12 @@ var provisionAcrCmd = &cobra.Command{
 		pterm.Success.Println("Push to ACR completed successfully.")
 
 		if configs.DeleteAfterPush {
-			pterm.Info.Printf("Deleting local image %s...\n", fullAcrImage)
-			if err := docker.RemoveImage(fullAcrImage, useAI); err != nil {
+			pterm.Info.Printf("Deleting local image %s...\n", localImage)
+			if err := docker.RemoveImage(localImage, useAI); err != nil {
 				pterm.Error.Println("Failed to delete local image:", err)
 				return fmt.Errorf("failed to delete local image: %v", err)
 			}
-			pterm.Success.Println("Successfully deleted local image:", fullAcrImage)
+			pterm.Success.Println("Successfully deleted local image:", localImage)
 		}
 
 		pterm.Success.Println("ACR provisioning completed successfully.")
@@ -145,7 +134,7 @@ var provisionAcrCmd = &cobra.Command{
 	},
 	Example: `
   smurf sdkr provision-acr myimage:v1 -s <SUBSCRIPTION_ID> -r <RESOURCE_GROUP> -g <REGISTRY_NAME>
-  smurf sdkr provision-acr -f Dockerfile -c -a key1=value1 -a key2=value2 -t my-target -p linux/amd64 -o report.sarif  -y -d
+  smurf sdkr provision-acr -f Dockerfile -c -a key1=value1 -a key2=value2 -t my-target -p linux/amd64 -y -d
 `,
 }
 
@@ -156,13 +145,11 @@ func init() {
 
 	provisionAcrCmd.Flags().StringVarP(&configs.DockerfilePath, "file", "f", "", "path to Dockerfile relative to context directory")
 	provisionAcrCmd.Flags().BoolVarP(&configs.NoCache, "no-cache", "c", false, "Do not use cache when building the image")
-	provisionAcrCmd.Flags().StringArrayVarP(&configs.BuildArgs, "build-arg", "a", []string{}, "Set build-time variables")
+	provisionAcrCmd.Flags().StringArrayVarP(&configs.BuildArgs, "build-arg", "a", []string{}, "Set build-time variables (key=value). Repeat the flag or pass comma-separated pairs")
 	provisionAcrCmd.Flags().StringVarP(&configs.Target, "target", "t", "", "Set the target build stage to build")
 	provisionAcrCmd.Flags().StringVarP(&configs.Platform, "platform", "p", "", "Platform for the image")
 	provisionAcrCmd.Flags().StringVar(&configs.ContextDir, "context", "", "Build context directory (default: current directory)")
 	provisionAcrCmd.Flags().IntVar(&configs.BuildTimeout, "timeout", 1500, "Build timeout")
-
-	provisionAcrCmd.Flags().StringVarP(&configs.SarifFile, "output", "o", "", "Output file for SARIF report")
 
 	provisionAcrCmd.Flags().BoolVarP(&configs.ConfirmAfterPush, "yes", "y", false, "Push the image to ACR without confirmation")
 	provisionAcrCmd.Flags().BoolVarP(&configs.DeleteAfterPush, "delete", "d", false, "Delete the local image after pushing")

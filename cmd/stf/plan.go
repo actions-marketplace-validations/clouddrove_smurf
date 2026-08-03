@@ -1,6 +1,8 @@
 package stf
 
 import (
+	"os"
+
 	"github.com/clouddrove/smurf/internal/terraform"
 	"github.com/spf13/cobra"
 )
@@ -13,6 +15,7 @@ var planTarget []string
 var planRefresh bool
 var planState string
 var planOut string
+var planDetailedExitCode bool
 
 // planCmd defines a subcommand that generates and shows an execution plan for Terraform
 var planCmd = &cobra.Command{
@@ -20,16 +23,23 @@ var planCmd = &cobra.Command{
 	Short:        "Generate and show an execution plan for Terraform",
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return terraform.Plan(planVarNameValue, planVarFile, planDir, planDestroy, planTarget, planRefresh, planState, planOut, useAI)
+		hasChanges, err := terraform.Plan(planVarNameValue, planVarFile, planDir, planDestroy, planTarget, planRefresh, planState, planOut, useAI)
+		if err != nil {
+			return err
+		}
+		if planDetailedExitCode && hasChanges {
+			os.Exit(2)
+		}
+		return nil
 	},
 	Example: `
     smurf stf plan
 
     # Specify variables
-    smurf stf plan -var="region=us-west-2"
+    smurf stf plan --var="region=us-west-2"
 
     # Specify multiple variables
-    smurf stf plan -var="region=us-west-2" -var="instance_type=t2.micro"
+    smurf stf plan --var="region=us-west-2" --var="instance_type=t2.micro"
 
     # Specify a custom directory
     smurf stf plan --dir=/path/to/terraform/files
@@ -47,11 +57,14 @@ var planCmd = &cobra.Command{
 
     # Use custom state file
     smurf stf plan --state=/path/to/terraform.tfstate
-    smurf stf plan -state=prod.tfstate
+    smurf stf plan --state=prod.tfstate
 
     # Combine with other flags
     smurf stf plan --target=aws_instance.web --destroy --var="instance_type=t2.micro" --refresh=false --state=prod.tfstate
     smurf stf plan --out=prod.plan --var-file=vars.tfvars
+
+    # CI/CD: exit 0 = no changes, 1 = error, 2 = changes pending
+    smurf stf plan --detailed-exitcode --out=tfplan --var-file=vars.tfvars
     `,
 }
 
@@ -64,6 +77,7 @@ func init() {
 	planCmd.Flags().BoolVar(&planRefresh, "refresh", true, "Update state prior to checking for differences")
 	planCmd.Flags().StringVar(&planState, "state", "", "Path to read and save the Terraform state")
 	planCmd.Flags().StringVar(&planOut, "out", "", "Path to save the generated execution plan")
+	planCmd.Flags().BoolVar(&planDetailedExitCode, "detailed-exitcode", false, "Return exit code 2 when changes are pending (0 = no changes, 1 = error)")
 	planCmd.Flags().BoolVar(&useAI, "ai", false, "To enable AI help mode, export the OPENAI_API_KEY environment variable with your OpenAI API key.")
 	stfCmd.AddCommand(planCmd)
 }

@@ -19,22 +19,67 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// getKubeClient returns a Kubernetes clientset using the kubeconfig file specified in the settings.
+// getKubeClient returns the shared Kubernetes clientset, built from the kubeconfig
+// file specified in settings. Initialization runs exactly once via kubeClientOnce,
+// even when called concurrently (e.g. HelmProvision's parallel lint/template/install
+// goroutines, or the upgrade monitor's poll goroutine racing the main goroutine).
+//
+// If initialization fails, the error is cached in kubeClientErr and returned to
+// every caller for the lifetime of the process; it is not retried. This keeps the
+// error behavior simple and coherent (every caller sees the same failure), and is
+// acceptable here because each smurf invocation is a short lived process, so a
+// transient kubeconfig problem can be fixed by simply re-running the command.
 func getKubeClient() (*kubernetes.Clientset, error) {
-	if kubeClientset != nil {
-		return kubeClientset, nil
-	}
+	kubeClientOnce.Do(func() {
+		config, err := clientcmd.BuildConfigFromFlags("", settings.KubeConfig)
+		if err != nil {
+			pterm.Error.Println("Failed to build Kubernetes configuration: ", err)
+			kubeClientErr = fmt.Errorf("failed to build Kubernetes configuration: %v", err)
+			return
+		}
+		clientset, err := kubernetes.NewForConfig(config)
+		if err != nil {
+			pterm.Error.Println("Failed to create Kubernetes clientset: ", err)
+			kubeClientErr = fmt.Errorf("failed to create Kubernetes clientset: %v", err)
+			return
+		}
+		kubeClientset = clientset
+	})
+	return kubeClientset, kubeClientErr
+}
+
+// ListNamespaces returns the names of all namespaces visible to the
+// configured Kubernetes client, for use in shell completion. It never
+// prints and honors ctx's deadline, so a slow or unreachable cluster can't
+// hang shell completion; callers should pass a context with a short (2-3s)
+// timeout.
+//
+// It intentionally builds its own client instead of reusing getKubeClient:
+// that helper prints an error message as a side effect of the first failed
+// call (cached for the process via kubeClientOnce), which is fine for
+// regular command output but would violate the "completion functions never
+// print" rule.
+func ListNamespaces(ctx context.Context) ([]string, error) {
 	config, err := clientcmd.BuildConfigFromFlags("", settings.KubeConfig)
 	if err != nil {
-		pterm.Error.Println("Failed to build Kubernetes configuration: ", err)
-		return nil, fmt.Errorf("failed to build Kubernetes configuration: %v", err)
+		return nil, err
 	}
-	kubeClientset, err = kubernetes.NewForConfig(config)
+
+	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		pterm.Error.Println("Failed to create Kubernetes clientset: ", err)
-		return nil, fmt.Errorf("failed to create Kubernetes clientset: %v", err)
+		return nil, err
 	}
-	return kubeClientset, nil
+
+	nsList, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(nsList.Items))
+	for _, ns := range nsList.Items {
+		names = append(names, ns.Name)
+	}
+	return names, nil
 }
 
 // logDetailedError prints a detailed error message based on the error type and provides suggestions for troubleshooting.
@@ -243,6 +288,11 @@ func resourcesReady(clientset *kubernetes.Clientset, namespace string, resources
 				pterm.Error.Println(err)
 				return false, nil, err
 			}
+			// Check if pod is Succeeded (valid terminal state for Jobs)
+			if pod.Status.Phase == corev1.PodSucceeded {
+				// Pod completed successfully, consider it ready
+				continue
+			}
 			if pod.Status.Phase != corev1.PodRunning {
 				notReadyResources = append(notReadyResources, fmt.Sprintf("Pod/%s (Phase: %s)", res.Name, pod.Status.Phase))
 			} else {
@@ -292,30 +342,43 @@ func describeFailedResources(namespace, releaseName string) {
 	}
 
 	for _, pod := range podList.Items {
-		pterm.FgGreen.Printfln("Pod: %s \n", pod.Name)
-		pterm.FgGreen.Printfln("Phase: %s \n", pod.Status.Phase)
+		status := getKubectlLikeStatus(pod)
+		unhealthy := isPodUnhealthyForUpgrade(&pod) ||
+			pod.Status.Phase == corev1.PodFailed ||
+			strings.Contains(status, "CrashLoopBackOff") ||
+			strings.Contains(status, "ImagePullBackOff") ||
+			strings.Contains(status, "Failed")
+
+		if !unhealthy {
+			continue
+		}
+
+		pterm.Error.Printfln("Pod: %s — %s", pod.Name, status)
+		pterm.Error.Printfln("Phase: %s", pod.Status.Phase)
 		for _, cs := range pod.Status.ContainerStatuses {
 			if cs.State.Waiting != nil {
-				pterm.FgRed.Printfln("Container: %s is waiting with reason: %s, message: %s \n", cs.Name, cs.State.Waiting.Reason, cs.State.Waiting.Message)
+				pterm.FgRed.Printfln("Container: %s is waiting with reason: %s, message: %s", cs.Name, cs.State.Waiting.Reason, cs.State.Waiting.Message)
 			} else if cs.State.Terminated != nil {
-				pterm.FgRed.Printfln("Container: %s is terminated with reason: %s, message: %s \n", cs.Name, cs.State.Terminated.Reason, cs.State.Terminated.Message)
+				pterm.FgRed.Printfln("Container: %s is terminated with reason: %s, message: %s", cs.Name, cs.State.Terminated.Reason, cs.State.Terminated.Message)
 			}
 		}
+
+		printFailedPodLogs(clientset, namespace, pod)
 
 		evts, err := clientset.CoreV1().Events(namespace).List(context.Background(), metav1.ListOptions{
 			FieldSelector: fmt.Sprintf("involvedObject.name=%s", pod.Name),
 		})
 		if err != nil {
-			pterm.Warning.Printfln("Error fetching events for pod %s: %v \n", pod.Name, err)
+			pterm.Warning.Printfln("Error fetching events for pod %s: %v", pod.Name, err)
 			continue
 		}
 
 		if len(evts.Items) == 0 {
-			pterm.Warning.Printfln("No events found for pod %s \n", pod.Name)
+			pterm.Warning.Printfln("No events found for pod %s", pod.Name)
 		} else {
-			pterm.FgGreen.Printfln("Events for pod %s: \n", pod.Name)
+			pterm.FgGreen.Printfln("Events for pod %s:", pod.Name)
 			for _, evt := range evts.Items {
-				pterm.FgGreen.Printfln("  %s: %s \n", evt.Reason, evt.Message)
+				pterm.FgGreen.Printfln("  %s: %s", evt.Reason, evt.Message)
 			}
 		}
 		pterm.FgCyan.Println("-------------------------------------------------------")

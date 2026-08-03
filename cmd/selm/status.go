@@ -2,11 +2,12 @@ package selm
 
 import (
 	"errors"
-	"os"
+	"fmt"
 	"path/filepath"
 
 	"github.com/clouddrove/smurf/configs"
 	"github.com/clouddrove/smurf/internal/helm"
+	"github.com/clouddrove/smurf/internal/utils"
 	"github.com/pterm/pterm"
 	"github.com/spf13/cobra"
 )
@@ -21,6 +22,10 @@ var statusCmd = &cobra.Command{
 	Args:         cobra.MaximumNArgs(1),
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if !utils.ValidOutputFormat(outputFormat, "table", "json", "yaml") {
+			return fmt.Errorf("invalid output format %q: must be one of table, json, yaml", outputFormat)
+		}
+
 		var releaseName string
 
 		if len(args) >= 1 {
@@ -40,7 +45,7 @@ var statusCmd = &cobra.Command{
 
 			if releaseName == "" {
 				pterm.Error.Printfln("NAME must be provided either as an argument or in the config")
-				return errors.New(pterm.Error.Sprintfln("NAME must be provided either as an argument or in the config"))
+				return errors.New("NAME must be provided either as an argument or in the config")
 			}
 
 			if configs.Namespace == "" && data.Selm.Namespace != "" {
@@ -52,9 +57,9 @@ var statusCmd = &cobra.Command{
 			configs.Namespace = "default"
 		}
 
-		err := helm.HelmStatus(releaseName, configs.Namespace, useAI)
+		err := helm.HelmStatus(releaseName, configs.Namespace, outputFormat, useAI)
 		if err != nil {
-			os.Exit(1)
+			return err
 		}
 		return nil
 	},
@@ -67,11 +72,22 @@ var statusCmd = &cobra.Command{
 
 	smurf selm status
 	# In this example, it will read the release name from the config file and fetch its status
+
+	smurf selm status my-release -o json
+	# In this example, it will print the status as a JSON document to stdout
 	`,
 }
 
 func init() {
 	statusCmd.Flags().StringVarP(&configs.Namespace, "namespace", "n", "", "Specify the namespace to get status of the Helm chart")
+	statusCmd.Flags().StringVarP(&outputFormat, "output", "o", "table", "output format (table|json|yaml)")
 	statusCmd.Flags().BoolVar(&useAI, "ai", false, "To enable AI help mode, export the OPENAI_API_KEY environment variable with your OpenAI API key.")
+
+	statusCmd.ValidArgsFunction = completeReleaseNames
+	_ = statusCmd.RegisterFlagCompletionFunc("namespace", completeNamespaces)
+	_ = statusCmd.RegisterFlagCompletionFunc("output", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return []string{"table", "json", "yaml"}, cobra.ShellCompDirectiveDefault
+	})
+
 	selmCmd.AddCommand(statusCmd)
 }

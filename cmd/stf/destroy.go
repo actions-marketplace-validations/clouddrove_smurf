@@ -1,13 +1,11 @@
 package stf
 
 import (
-	"os"
-
 	"github.com/clouddrove/smurf/internal/terraform"
 	"github.com/spf13/cobra"
 )
 
-var destroyApprove bool
+var destroyApprove bool // deprecated: use destroyAutoApprove via --auto-approve
 var destroyAutoApprove bool
 var destroyLock bool
 var destroyDir string
@@ -20,34 +18,37 @@ var destroyCmd = &cobra.Command{
 	Short:        "Destroy the Terraform Infrastructure",
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Use either approve or auto-approve flag
-		approve := destroyApprove || destroyAutoApprove
-		err := terraform.Destroy(approve, destroyLock, destroyDir, destroyVarNameValue, destroyVarFile, useAI) // UPDATED: added new parameters
-		if err != nil {
-			os.Exit(1)
-		}
-		return nil
+		// --approve is a deprecated alias for --auto-approve; honor either one.
+		approve := destroyAutoApprove || destroyApprove
+		return terraform.Destroy(approve, destroyLock, destroyDir, destroyVarNameValue, destroyVarFile, useAI)
 	},
 	Example: `
+	# simple smurf stf destroy commad
 	smurf stf destroy
+
 	# Skip approval prompt
 	smurf stf destroy --auto-approve
+
 	# Specify a custom directory
 	smurf stf destroy --dir=/path/to/terraform
-	# NEW: Use variable files
+
+	# Use variable files
 	smurf stf destroy --var-file=production.tfvars
 	smurf stf destroy --var-file=common.tfvars --var-file=production.tfvars
-	# NEW: Use variables
+
+	# Use variables
 	smurf stf destroy --var="environment=staging"
+	
 	# Combined usage
 	smurf stf destroy --auto-approve --var-file=prod.tfvars --var="force_destroy=true"
 `,
 }
 
 func init() {
-	destroyCmd.Flags().BoolVar(&destroyApprove, "approve", false, "Skip interactive approval of plan before applying")
 	destroyCmd.Flags().BoolVar(&destroyAutoApprove, "auto-approve", false, "Skip interactive approval of plan before destroying")
-	destroyCmd.Flags().BoolVar(&destroyLock, "lock", true, "Don't hold a state lock during the operation. This is dangerous if others might concurrently run commands against the same workspace.")
+	destroyCmd.Flags().BoolVar(&destroyApprove, "approve", false, "Skip interactive approval of plan before applying")
+	_ = destroyCmd.Flags().MarkDeprecated("approve", "use --auto-approve instead")
+	destroyCmd.Flags().BoolVar(&destroyLock, "lock", true, "Hold a state lock during the operation (disable with --lock=false)")
 	destroyCmd.Flags().StringVar(&destroyDir, "dir", ".", "Specify the directory containing Terraform configuration")
 
 	// NEW: Add var and var-file flags

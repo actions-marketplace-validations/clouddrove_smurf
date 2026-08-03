@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/clouddrove/smurf/configs"
@@ -14,14 +13,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// provisionHubCmd sets up the "provision-hub" command to build, scan, and optionally push
+// provisionHubCmd sets up the "provision-hub" command to build and optionally push
 // Docker images to Docker Hub. It also supports setting Docker Hub credentials via environment
 // variables or config, uses build arguments, and allows automated cleanup of local images
 // after a successful push.
 var provisionHubCmd = &cobra.Command{
 	Use:   "provision-hub [IMAGE_NAME[:TAG]]",
-	Short: "Build, scan, and push a Docker image .",
-	Long: `Build, scan, and push a Docker image to Docker Hub.
+	Short: "Build and push a Docker image.",
+	Long: `Build and push a Docker image to Docker Hub.
 	Set DOCKER_USERNAME and DOCKER_PASSWORD environment variables for Docker Hub authentication, for example:
   	export DOCKER_USERNAME="your-username"
   	export DOCKER_PASSWORD="your-password"`,
@@ -59,7 +58,6 @@ var provisionHubCmd = &cobra.Command{
 		}
 
 		if os.Getenv("DOCKER_USERNAME") == "" || os.Getenv("DOCKER_PASSWORD") == "" {
-			fmt.Println("error : ", os.Getenv("DOCKER_USERNAME"), "&&", os.Getenv("DOCKER_PASSWORD"))
 			pterm.Error.Println("Docker Hub credentials are required")
 			return errors.New("missing required Docker Hub credentials")
 		}
@@ -79,12 +77,9 @@ var provisionHubCmd = &cobra.Command{
 
 		fullImageName := fmt.Sprintf("%s:%s", localImageName, localTag)
 
-		buildArgsMap := make(map[string]string)
-		for _, arg := range configs.BuildArgs {
-			parts := strings.SplitN(arg, "=", 2)
-			if len(parts) == 2 {
-				buildArgsMap[parts[0]] = parts[1]
-			}
+		buildArgsMap, err := sdkrBuildArgs()
+		if err != nil {
+			return err
 		}
 
 		if configs.ContextDir == "" {
@@ -117,23 +112,15 @@ var provisionHubCmd = &cobra.Command{
 			return err
 		}
 		pterm.Success.Println("Build completed successfully.")
-		/*
-			pterm.Info.Println("Starting scan with Trivy...")
-			scanErr := docker.Trivy(fullImageName)
-			if scanErr != nil {
-				return scanErr
-			}
-		*/
-		/*
-			if !configs.ConfirmAfterPush {
-				pterm.Info.Println("Press Enter to continue...")
-				_, _ = bufio.NewReader(os.Stdin).ReadBytes('\n')
-			}*/
+
+		if err := confirmPush(); err != nil {
+			return err
+		}
 
 		pterm.Info.Printf("Pushing image %s...\n", fullImageName)
 		pushOpts := docker.PushOptions{
 			ImageName: fullImageName,
-			Timeout:   1000000000000,
+			Timeout:   time.Duration(configs.BuildTimeout) * time.Second,
 		}
 		if err := docker.PushImage(pushOpts, useAI); err != nil {
 			pterm.Error.Println("Push failed:", err)
@@ -155,7 +142,7 @@ var provisionHubCmd = &cobra.Command{
 	Example: `
   # Provide "myuser/myimage:latest" as an argument
   smurf sdkr provision-hub myuser/myimage:latest --context . --file Dockerfile --no-cache \
-    --build-arg key1=value1 --build-arg key2=value2 --target my-target --platform linux/amd64 \
+    --build-arg key1=value1,key2=value2 --target my-target --platform linux/amd64 \
     --yes --delete
 
   # If you omit the argument, it will read from config and rely on "image_name" from there
@@ -180,7 +167,7 @@ func init() {
 		&configs.BuildArgs,
 		"build-arg",
 		[]string{},
-		"Set build-time variables (e.g. --build-arg key=value)",
+		"Set build-time variables (key=value). Repeat the flag or pass comma-separated pairs",
 	)
 	provisionHubCmd.Flags().StringVar(
 		&configs.Target,
