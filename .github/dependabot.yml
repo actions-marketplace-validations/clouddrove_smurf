@@ -17,10 +17,59 @@ updates:
     directory: "/" # Location of package manifests
     schedule:
       interval: "daily"
+    # The k8s.io modules share a release train and generated code that calls
+    # across module boundaries, so they only compile at a matching version.
+    # Ungrouped, dependabot opened one PR per module: #513 bumped apimachinery
+    # to 0.37.0 on its own, leaving k8s.io/api at 0.36.4, whose generated code
+    # calls validate.EachSliceVal, removed in 0.37.0. That PR could never pass
+    # CI. Grouping them means one PR that moves the whole set together.
+    groups:
+      k8s:
+        patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"
     # Add assignees
     assignees:
       - "clouddrove-ci"
     # Add reviewer
+    reviewers:
+      - "anmolnagpal"
+      - "anketclouddrove"
+
+  # docs/sm MkDocs site. Without this entry the requirements manifest was
+  # never updated, so its advisories only ever surfaced as alerts.
+  - package-ecosystem: "pip"
+    directory: "/docs/sm/docs"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "clouddrove-ci"
+    reviewers:
+      - "anmolnagpal"
+      - "anketclouddrove"
+
+  # The runtime image's base images. Without this entry nothing tracked them,
+  # and alpine sat on 3.18 for over a year past its 2025-05-09 end of life.
+  # Note this covers FROM lines only: the gcloud, Trivy and Terraform versions
+  # pinned as ARGs in the Dockerfile are not something dependabot updates, so
+  # those stay manual.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "clouddrove-ci"
+    reviewers:
+      - "anmolnagpal"
+      - "anketclouddrove"
+
+  # Azure DevOps extension task, which ships its own package-lock.json.
+  - package-ecosystem: "npm"
+    directory: "/azure-devops-extension/Smurf"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "clouddrove-ci"
     reviewers:
       - "anmolnagpal"
       - "anketclouddrove"

@@ -5,34 +5,43 @@ on:
       - master
       - feat/mk-docs
   workflow_dispatch:
-permissions: write-all
+# Restrictive default; each job widens only as far as it needs.
+permissions:
+  contents: read
 
 jobs:
   build:
     name: Build Docs
     runs-on: ubuntu-latest
+    # `mkdocs gh-deploy` pushes the built site to the gh-pages branch.
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Configure Git Credentials
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: 3.x
+          # Pinned rather than 3.x: watchdog, pulled in by mkdocs, ships no
+          # cp314 wheel, so a runner moving to 3.14 would break the build.
+          python-version: "3.13"
+
       - run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV
 
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: mkdocs-material-${{ env.cache_id }}
           path: .cache
           restore-keys: |
             mkdocs-material-
 
-      - run: pip install mkdocs-bootswatch
-      - run: pip install mkdocs-material mkdocs-git-revision-date-localized-plugin
+      # Hash-pinned install: pip verifies every artifact and refuses to run
+      # sdist setup scripts. See docs/sm/docs/requirements.txt to regenerate.
+      - run: "pip install --require-hashes --only-binary :all: -r docs/sm/docs/requirements.txt"
 
       - name: Deploy Documentation
         working-directory: ./docs/sm  # Specify your documentation directory here
@@ -45,20 +54,24 @@ jobs:
       name: smurf-url
       url: https://smurf.clouddrove.com
     needs: build
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     steps:
       - name: Checkout gh-pages branch
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: gh-pages
           token: ${{ secrets.GITHUB }}
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: ./
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
         with:
-          artifact_name: github-pages	
+          artifact_name: github-pages

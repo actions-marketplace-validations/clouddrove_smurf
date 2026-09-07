@@ -22,18 +22,36 @@ var (
 )
 
 // upgradeCmd facilitates upgrading an existing Helm release or installing it if it's not present
+// upgradeTimeout backs upgrade's --timeout flag. See installTimeout in
+// install.go for why each command owns its own variable.
+var upgradeTimeout int
+
+// skipVerify backs --skip-verify.
+var skipVerify bool
+
 var upgradeCmd = &cobra.Command{
 	Use:          "upgrade [NAME] [CHART]",
 	Short:        "Upgrade a deployed Helm chart.",
 	Args:         cobra.MaximumNArgs(2),
 	SilenceUsage: true,
-	RunE: func(cmd *cobra.Command, args []string) error {
+	RunE: func(cmd *cobra.Command, args []string) (err error) {
+		var releaseName, chartPath string
+
+		// An upgrade can fail before helm.HelmUpgrade is ever entered, most
+		// commonly on the release-exists check against an unreachable cluster.
+		// Reporting from here covers those too; helm.ReportFailureToCI only
+		// publishes the first failure, so this does not duplicate the report
+		// the upgrade itself makes.
+		defer func() {
+			if err != nil {
+				helm.ReportFailureToCI(configs.Namespace, releaseName, "Helm upgrade", err)
+			}
+		}()
+
 		if configs.Debug {
 			pterm.EnableDebugMessages()
 			pterm.Println("=== DEBUG MODE ENABLED ===")
 		}
-
-		var releaseName, chartPath string
 
 		if len(args) >= 1 {
 			releaseName = args[0]
@@ -90,7 +108,7 @@ var upgradeCmd = &cobra.Command{
 			return errors.New("RELEASE and CHART must be provided")
 		}
 
-		timeoutDuration := time.Duration(configs.Timeout) * time.Second
+		timeoutDuration := time.Duration(upgradeTimeout) * time.Second
 
 		if configs.Debug {
 			pterm.Printf("Configuration\n")
@@ -166,6 +184,7 @@ var upgradeCmd = &cobra.Command{
 			historyMax,
 			useAI,
 			forceUpgrade,
+			skipVerify,
 		)
 		if err != nil {
 			return err
@@ -207,12 +226,16 @@ func init() {
 	upgradeCmd.Flags().StringVarP(&configs.Namespace, "namespace", "n", "default", "Specify the namespace to install the release into")
 	upgradeCmd.Flags().BoolVar(&createNamespace, "create-namespace", false, "Create the namespace if it does not exist")
 	upgradeCmd.Flags().BoolVar(&configs.Atomic, "atomic", false, "If set, the installation process purges the chart on fail, the upgrade process rolls back changes, and the upgrade process waits for the resources to be ready")
-	upgradeCmd.Flags().IntVar(&configs.Timeout, "timeout", 120, "Time to wait for any individual Kubernetes operation (like Jobs for hooks)")
+	upgradeCmd.Flags().IntVar(&upgradeTimeout, "timeout", 120, "Time to wait for any individual Kubernetes operation (like Jobs for hooks)")
 	upgradeCmd.Flags().BoolVar(&configs.Debug, "debug", false, "Enable verbose output")
 	upgradeCmd.Flags().BoolVar(&installIfNotPresent, "install", false, "Install the chart if it is not already installed")
 	upgradeCmd.Flags().BoolVar(&forceUpgrade, "force", false, "Force resource updates through delete/recreate if needed")
 	upgradeCmd.Flags().StringVar(&RepoURL, "repo-url", "", "Helm repository URL")
 	upgradeCmd.Flags().StringVar(&Version, "version", "", "Helm chart version")
+	// Readiness is verified by default. This is the way out for a deliberate
+	// fire-and-forget rollout, rather than making everyone opt in to knowing
+	// whether their deploy worked.
+	upgradeCmd.Flags().BoolVar(&skipVerify, "skip-verify", false, "Do not wait for resources to become ready; report success as soon as Helm returns")
 	upgradeCmd.Flags().BoolVar(&wait, "wait", false, "Wait until all Pods, PVCs, Services, and minimum number of Pods of a Deployment are ready before marking success")
 	upgradeCmd.Flags().IntVar(&historyMax, "history-max", 10, "Limit the maximum number of revisions saved per release")
 	upgradeCmd.Flags().BoolVar(&useAI, "ai", false, "To enable AI help mode, export the OPENAI_API_KEY environment variable with your OpenAI API key.")

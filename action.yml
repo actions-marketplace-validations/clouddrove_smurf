@@ -41,8 +41,33 @@ runs:
         set -euo pipefail
 
         if [ "$INPUT_VERSION" = "latest" ]; then
-          # Get latest tag
-          LATEST_TAG=$(curl -s https://api.github.com/repos/clouddrove/smurf/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+          # Resolved from the releases/latest redirect rather than the REST API.
+          # The API allows 60 unauthenticated requests per hour per IP, and
+          # hosted runners share egress addresses, so the previous
+          # `curl -s ... | grep tag_name` returned nothing once that budget was
+          # spent. Under `set -e -o pipefail` the grep failure exited 1 with no
+          # message, which is how this failed on macOS runners while passing on
+          # ubuntu. The redirect carries no such limit.
+          if ! LATEST_URL=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              https://github.com/clouddrove/smurf/releases/latest); then
+            echo "❌ Could not reach GitHub to resolve the latest smurf release."
+            echo "   Pass an explicit version (e.g. version: v1.1.9) to skip this lookup."
+            exit 1
+          fi
+
+          LATEST_TAG="${LATEST_URL##*/}"
+
+          # A redirect to the releases index rather than a tag means no release
+          # was resolved; without this the empty value flows into the download
+          # URL and fails later with a confusing 404.
+          if [[ ! "$LATEST_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ Could not determine the latest smurf release (got: '$LATEST_TAG')."
+            echo "   Pass an explicit version (e.g. version: v1.1.9) to skip this lookup."
+            exit 1
+          fi
+
+          echo "Resolved latest release: $LATEST_TAG"
           echo "tag=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
         else
           # Validate version format (must start with v and contain only safe chars)
@@ -69,11 +94,46 @@ runs:
         
         echo "Downloading from: $URL"
         
-        # Download and extract
-        if ! curl -fsSLo smurf.tar.gz "$URL"; then
+        # Download and extract. --proto '=https' rejects a non-HTTPS URL and
+        # --proto-redir '=https' keeps every redirect hop on HTTPS, so the
+        # release tarball cannot be fetched over plain HTTP via a redirect.
+        if ! curl -fsSLo smurf.tar.gz --proto '=https' --proto-redir '=https' --tlsv1.2 "$URL"; then
           echo "❌ Failed to download smurf from $URL"
           exit 1
         fi
+
+        # Verify against checksums.txt from the same release. The version is
+        # chosen at runtime, so a checksum cannot be pinned in this file.
+        # This catches a truncated or corrupted download and a tarball swapped
+        # on its own; it does NOT defend against someone who can rewrite the
+        # whole release, since they could rewrite checksums.txt with it.
+        TARBALL="smurf-${VERSION}-${OS}-${ARCH}.tar.gz"
+        SUMS_URL="https://github.com/clouddrove/smurf/releases/download/${VERSION}/checksums.txt"
+        if ! curl -fsSLo checksums.txt --proto '=https' --proto-redir '=https' --tlsv1.2 "$SUMS_URL"; then
+          echo "❌ Failed to download checksums from $SUMS_URL"
+          exit 1
+        fi
+        EXPECTED="$(awk -v f="$TARBALL" '$2 == f { print $1 }' checksums.txt)"
+        if [ -z "$EXPECTED" ]; then
+          echo "❌ No checksum for $TARBALL in checksums.txt"
+          exit 1
+        fi
+        # This action supports macOS runners, which ship shasum rather than
+        # the GNU sha256sum available on the Linux images.
+        if command -v sha256sum >/dev/null 2>&1; then
+          ACTUAL="$(sha256sum smurf.tar.gz | cut -d' ' -f1)"
+        else
+          ACTUAL="$(shasum -a 256 smurf.tar.gz | cut -d' ' -f1)"
+        fi
+        if [ "$EXPECTED" != "$ACTUAL" ]; then
+          echo "❌ Checksum mismatch for $TARBALL"
+          echo "   expected: $EXPECTED"
+          echo "   actual:   $ACTUAL"
+          exit 1
+        fi
+        echo "✅ Checksum verified for $TARBALL"
+        rm -f checksums.txt
+
         tar -xzf smurf.tar.gz
         chmod +x smurf
         sudo mv smurf /usr/local/bin/
